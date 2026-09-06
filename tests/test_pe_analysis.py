@@ -177,8 +177,6 @@ def test_imports_are_parsed() -> None:
         list,
     )
 
-    # Python.exe should contain
-    # at least one normal import library.
     assert len(imports) > 0
 
 
@@ -298,23 +296,35 @@ def test_complete_report() -> None:
 
     assert report["size_bytes"] > 0
 
-    assert "headers" in report
-    assert "sections" in report
-    assert "imports" in report
-    assert "exports" in report
+    required_keys = {
+        "tool",
+        "module",
+        "analysis_version",
+        "analysis_time",
+        "file",
+        "size_bytes",
+        "file_metadata",
+        "hashes",
+        "headers",
+        "data_directories",
+        "sections",
+        "section_intelligence",
+        "imports",
+        "import_intelligence",
+        "exports",
+        "certificate_analysis",
+        "certificate_summary",
+        "strings",
+        "overlay",
+        "indicators",
+        "indicator_summary",
+        "risk_assessment",
+        "analysis_metrics",
+    }
 
-    assert "certificate_analysis" in report
-    assert "certificate_summary" in report
-
-    assert "strings" in report
-    assert "overlay" in report
-
-    assert "indicators" in report
-    assert "indicator_summary" in report
-
-    assert "risk_assessment" in report
-
-    assert "analysis_metrics" in report
+    assert required_keys.issubset(
+        report.keys()
+    )
 
 
 # ============================================================================
@@ -323,7 +333,7 @@ def test_complete_report() -> None:
 
 
 def test_indicator_summary_is_consistent() -> None:
-    """Verify that the indicator summary has a valid structure."""
+    """Verify that indicator totals match their severity breakdown."""
 
     report = build_report(
         PYTHON_EXE
@@ -364,11 +374,17 @@ def test_indicator_summary_is_consistent() -> None:
         "info",
     ):
         assert severity in severity_counts
+
         assert isinstance(
             severity_counts[severity],
             int,
         )
+
         assert severity_counts[severity] >= 0
+
+    assert summary["total"] == sum(
+        severity_counts.values()
+    )
 
 
 # ============================================================================
@@ -403,6 +419,7 @@ def test_risk_assessment_is_present_and_valid() -> None:
     assert 0 <= risk["score"] <= 100
 
     assert risk["rating"] in {
+        "MINIMAL",
         "LOW",
         "MEDIUM",
         "HIGH",
@@ -415,7 +432,7 @@ def test_risk_assessment_is_present_and_valid() -> None:
     )
 
     assert len(
-        risk["method"]
+        risk["method"].strip()
     ) > 0
 
     assert isinstance(
@@ -425,7 +442,7 @@ def test_risk_assessment_is_present_and_valid() -> None:
 
 
 def test_risk_reasons_have_valid_structure() -> None:
-    """Verify that every risk reason contains points and a description."""
+    """Verify that every risk reason contains valid points and text."""
 
     report = build_report(
         PYTHON_EXE
@@ -447,20 +464,20 @@ def test_risk_reasons_have_valid_structure() -> None:
             int,
         )
 
+        assert reason["points"] >= 0
+
         assert isinstance(
             reason["reason"],
             str,
         )
 
         assert len(
-            reason["reason"]
+            reason["reason"].strip()
         ) > 0
-
-        assert reason["points"] >= 0
 
 
 def test_risk_score_matches_reason_points() -> None:
-    """Verify that the displayed risk score equals the sum of its reasons."""
+    """Verify that the displayed score equals the capped reason total."""
 
     report = build_report(
         PYTHON_EXE
@@ -473,10 +490,95 @@ def test_risk_score_matches_reason_points() -> None:
         for reason in risk["reasons"]
     )
 
-    assert risk["score"] == min(
+    expected_score = min(
         calculated_score,
         100,
     )
+
+    assert risk["score"] == (
+        expected_score
+    )
+
+
+# ============================================================================
+# RISK RATING CONSISTENCY
+# ============================================================================
+
+
+def test_risk_rating_matches_score() -> None:
+    """Verify that the risk rating follows the analyzer's score thresholds."""
+
+    report = build_report(
+        PYTHON_EXE
+    )
+
+    risk = report["risk_assessment"]
+
+    score = risk["score"]
+    rating = risk["rating"]
+
+    if score >= 70:
+        assert rating == "HIGH"
+
+    elif score >= 40:
+        assert rating == "MEDIUM"
+
+    elif score >= 15:
+        assert rating == "LOW"
+
+    else:
+        assert rating == "MINIMAL"
+
+
+# ============================================================================
+# RISK REASON QUALITY
+# ============================================================================
+
+
+def test_risk_reasons_are_non_negative() -> None:
+    """Verify that risk scoring never contains negative reason weights."""
+
+    report = build_report(
+        PYTHON_EXE
+    )
+
+    reasons = report[
+        "risk_assessment"
+    ]["reasons"]
+
+    assert all(
+        reason["points"] >= 0
+        for reason in reasons
+    )
+
+
+# ============================================================================
+# DETERMINISM TEST
+# ============================================================================
+
+
+def test_risk_assessment_is_deterministic() -> None:
+    """Verify that repeated static analysis produces the same risk result."""
+
+    first_report = build_report(
+        PYTHON_EXE
+    )
+
+    second_report = build_report(
+        PYTHON_EXE
+    )
+
+    assert first_report[
+        "risk_assessment"
+    ] == second_report[
+        "risk_assessment"
+    ]
+
+    assert first_report[
+        "indicator_summary"
+    ] == second_report[
+        "indicator_summary"
+    ]
 
 
 # ============================================================================
@@ -485,7 +587,7 @@ def test_risk_score_matches_reason_points() -> None:
 
 
 def test_report_is_json_serializable() -> None:
-    """Verify that the complete report can be serialized to JSON."""
+    """Verify that the complete report can be serialized and decoded."""
 
     report = build_report(
         PYTHON_EXE
@@ -504,8 +606,6 @@ def test_report_is_json_serializable() -> None:
         serialized
     ) > 0
 
-    # Also verify that the serialized output
-    # can be decoded back into a Python object.
     decoded = json.loads(
         serialized
     )
@@ -518,3 +618,13 @@ def test_report_is_json_serializable() -> None:
     assert decoded["tool"] == (
         "SECURITY-MISC"
     )
+
+    assert decoded["module"] == (
+        "pe_analyzer"
+    )
+
+    assert decoded[
+        "risk_assessment"
+    ]["score"] == report[
+        "risk_assessment"
+    ]["score"]
