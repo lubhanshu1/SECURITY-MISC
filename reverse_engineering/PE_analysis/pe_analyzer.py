@@ -15,10 +15,7 @@ from .certificates import (
     summarize_certificates,
 )
 from .exports import parse_exports
-from .imports import (
-    parse_imports,
-    summarize_imports,
-)
+from .imports import parse_imports, summarize_imports
 from .indicators import generate_indicators
 from .parser import load_pe
 from .sections import parse_sections
@@ -29,10 +26,19 @@ from reverse_engineering.strings.string_analyzer import (
 
 
 # ============================================================================
-# VERSION
+# VERSION / ENGINE METADATA
 # ============================================================================
 
-ANALYSIS_VERSION = "0.7.0"
+ANALYSIS_VERSION = "0.8.0"
+ENGINE_NAME = "SECURITY-MISC"
+ENGINE_MODULE = "pe_analyzer"
+
+# Static-analysis safety limits. These prevent accidental resource exhaustion
+# from malformed files while keeping the analyzer read-only.
+MAX_FILE_SIZE_BYTES = 512 * 1024 * 1024
+MAX_DATA_DIRECTORIES = 16
+MAX_IMPORT_FUNCTIONS_DISPLAY = 30
+MAX_EXPORTS_DISPLAY = 50
 
 
 # ============================================================================
@@ -125,16 +131,69 @@ SUSPICIOUS_IMPORT_GROUPS: dict[str, set[str]] = {
 
 
 # ============================================================================
+# HELPERS
+# ============================================================================
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Convert a value to int without allowing malformed report data to fail."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _directory_by_index(
+    directories: list[dict[str, Any]],
+    index: int,
+) -> dict[str, Any] | None:
+    """Return one PE data directory by index."""
+    return next(
+        (
+            directory
+            for directory in directories
+            if directory.get("index") == index
+        ),
+        None,
+    )
+
+
+def _format_hex(value: Any, width: int = 0) -> str:
+    """Format an integer as hexadecimal for human-readable reports."""
+    number = _safe_int(value)
+    if width:
+        return f"0x{number:0{width}X}"
+    return f"0x{number:X}"
+
+
+def _timestamp_to_iso(timestamp: int) -> str | None:
+    """
+    Convert the PE COFF timestamp to UTC.
+
+    Returns None for zero or clearly invalid timestamps.
+    """
+    timestamp = _safe_int(timestamp)
+
+    if timestamp <= 0:
+        return None
+
+    try:
+        return datetime.fromtimestamp(
+            timestamp,
+            tz=timezone.utc,
+        ).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+# ============================================================================
 # HASHING
 # ============================================================================
 
-def calculate_hashes(
-    data: bytes,
-) -> dict[str, str]:
+def calculate_hashes(data: bytes) -> dict[str, str]:
     """
-    Calculate common hashes for the analyzed file.
+    Calculate common cryptographic hashes.
 
-    The input is treated only as bytes.
+    The input is treated only as bytes and is never executed.
     """
     return {
         "md5": hashlib.md5(data).hexdigest(),
@@ -152,39 +211,29 @@ def parse_data_directories(
     optional_offset: int,
     is_64_bit: bool,
     optional_header_size: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Parse the IMAGE_DATA_DIRECTORY array.
 
     PE32:
-        +96
+        directory array starts at optional-header + 96
 
     PE32+:
-        +112
+        directory array starts at optional-header + 112
+
+    The parser is deliberately bounded by both the optional-header size and
+    the physical file size.
     """
-    directory_base = (
-        112
-        if is_64_bit
-        else 96
-    )
+    directory_base = 112 if is_64_bit else 96
+    count_base = 108 if is_64_bit else 92
 
-    count_base = (
-        108
-        if is_64_bit
-        else 92
-    )
+    if optional_header_size < directory_base:
+        return []
 
-    directory_offset = (
-        optional_offset
-        + directory_base
-    )
+    directory_offset = optional_offset + directory_base
+    count_offset = optional_offset + count_base
 
-    count_offset = (
-        optional_offset
-        + count_base
-    )
-
-    if count_offset + 4 > len(data):
+    if count_offset < 0 or count_offset + 4 > len(data):
         return []
 
     number_of_directories = struct.unpack_from(
@@ -193,37 +242,28 @@ def parse_data_directories(
         count_offset,
     )[0]
 
-    if optional_header_size < directory_base:
-        return []
-
     max_available = (
-        optional_header_size
-        - directory_base
+        optional_header_size - directory_base
     ) // 8
 
     count = min(
         number_of_directories,
         max_available,
-        16,
+        MAX_DATA_DIRECTORIES,
     )
 
-    directories: list[dict] = []
+    directories: list[dict[str, Any]] = []
 
     for index in range(count):
-        offset = (
-            directory_offset
-            + index * 8
-        )
+        offset = directory_offset + index * 8
 
-        if offset + 8 > len(data):
+        if offset < 0 or offset + 8 > len(data):
             break
 
-        virtual_address, size = (
-            struct.unpack_from(
-                "<II",
-                data,
-                offset,
-            )
+        virtual_address, size = struct.unpack_from(
+            "<II",
+            data,
+            offset,
         )
 
         directories.append(
@@ -235,6 +275,7 @@ def parse_data_directories(
                 ),
                 "virtual_address": virtual_address,
                 "size": size,
+                "present": bool(virtual_address or size),
             }
         )
 
@@ -248,9 +289,11 @@ def parse_data_directories(
 def analyze_sections(
     sections: list[Any],
     entry_point_rva: int,
-) -> dict:
+) -> dict[str, Any]:
     """
     Derive higher-level static observations from PE sections.
+
+    This function does not execute section contents.
     """
     executable_sections: list[str] = []
     writable_sections: list[str] = []
@@ -258,7 +301,6 @@ def analyze_sections(
     high_entropy_sections: list[str] = []
     empty_sections: list[str] = []
     unusual_names: list[str] = []
-
     entry_point_section: str | None = None
 
     standard_names = {
@@ -278,64 +320,52 @@ def analyze_sections(
     }
 
     for section in sections:
-        name = str(
-            section.name
-        ).strip()
-
-        if section.is_executable:
-            executable_sections.append(
-                name
-            )
-
-        if section.is_writable:
-            writable_sections.append(
-                name
-            )
-
-        if (
-            section.is_executable
-            and section.is_writable
-        ):
-            executable_writable_sections.append(
-                name
-            )
-
-        if section.entropy >= 7.2:
-            high_entropy_sections.append(
-                name
-            )
-
-        if (
-            section.raw_size == 0
-            and section.virtual_size > 0
-        ):
-            empty_sections.append(
-                name
-            )
-
+        name = str(getattr(section, "name", "")).strip()
         normalized = name.lower()
 
-        if (
-            normalized
-            and normalized not in standard_names
-        ):
-            unusual_names.append(
-                name
-            )
-
-        start = section.virtual_address
-
-        span = max(
-            section.virtual_size,
-            section.raw_size,
+        is_executable = bool(
+            getattr(section, "is_executable", False)
+        )
+        is_writable = bool(
+            getattr(section, "is_writable", False)
+        )
+        entropy = float(
+            getattr(section, "entropy", 0.0) or 0.0
+        )
+        raw_size = _safe_int(
+            getattr(section, "raw_size", 0)
+        )
+        virtual_size = _safe_int(
+            getattr(section, "virtual_size", 0)
+        )
+        virtual_address = _safe_int(
+            getattr(section, "virtual_address", 0)
         )
 
-        end = start + span
+        if is_executable:
+            executable_sections.append(name)
+
+        if is_writable:
+            writable_sections.append(name)
+
+        if is_executable and is_writable:
+            executable_writable_sections.append(name)
+
+        if entropy >= 7.2:
+            high_entropy_sections.append(name)
+
+        if raw_size == 0 and virtual_size > 0:
+            empty_sections.append(name)
+
+        if normalized and normalized not in standard_names:
+            unusual_names.append(name)
+
+        span = max(virtual_size, raw_size)
+        end = virtual_address + span
 
         if (
-            start
-            <= entry_point_rva
-            < end
+            virtual_address <= entry_point_rva < end
+            and span > 0
         ):
             entry_point_section = name
 
@@ -346,32 +376,22 @@ def analyze_sections(
         "executable_writable_sections": (
             executable_writable_sections
         ),
-        "high_entropy_sections": (
-            high_entropy_sections
-        ),
-        "empty_raw_sections": (
-            empty_sections
-        ),
+        "high_entropy_sections": high_entropy_sections,
+        "empty_raw_sections": empty_sections,
         "unusual_names": unusual_names,
-        "entry_point_section": (
-            entry_point_section
-        ),
+        "entry_point_section": entry_point_section,
         "flags": {
-            "has_executable_writable_section": (
-                bool(
-                    executable_writable_sections
-                )
+            "has_executable_writable_section": bool(
+                executable_writable_sections
             ),
-            "has_high_entropy_section": (
-                bool(
-                    high_entropy_sections
-                )
+            "has_high_entropy_section": bool(
+                high_entropy_sections
             ),
-            "has_empty_raw_section": (
-                bool(empty_sections)
+            "has_empty_raw_section": bool(
+                empty_sections
             ),
-            "has_unusual_section_name": (
-                bool(unusual_names)
+            "has_unusual_section_name": bool(
+                unusual_names
             ),
         },
     }
@@ -381,55 +401,34 @@ def analyze_sections(
 # IMPORT INTELLIGENCE
 # ============================================================================
 
-def analyze_imports(
-    imports: list[dict],
-) -> dict:
+def analyze_imports(imports: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Analyze imported functions and group them into
-    broad static-analysis categories.
+    Analyze imported functions and group them into broad static categories.
     """
     all_functions: list[str] = []
 
     for library in imports:
-        for function in library.get(
-            "functions",
-            [],
-        ):
+        for function in library.get("functions", []):
             if function:
-                all_functions.append(
-                    str(function)
-                )
+                all_functions.append(str(function))
 
     unique_functions = {
         function.lower(): function
         for function in all_functions
     }
 
-    matched_groups: dict[
-        str,
-        list[str],
-    ] = {}
+    matched_groups: dict[str, list[str]] = {}
 
-    for (
-        group_name,
-        names,
-    ) in SUSPICIOUS_IMPORT_GROUPS.items():
+    for group_name, names in SUSPICIOUS_IMPORT_GROUPS.items():
         matches: list[str] = []
 
         for name in names:
-            actual = unique_functions.get(
-                name.lower()
-            )
-
+            actual = unique_functions.get(name.lower())
             if actual:
-                matches.append(
-                    actual
-                )
+                matches.append(actual)
 
         if matches:
-            matched_groups[
-                group_name
-            ] = sorted(
+            matched_groups[group_name] = sorted(
                 set(matches),
                 key=str.lower,
             )
@@ -440,22 +439,16 @@ def analyze_imports(
         for function in functions
     }
 
+    summary = summarize_imports(imports)
+
     return {
-        **summarize_imports(
-            imports
-        ),
-
-        "unique_functions": len(
-            unique_functions
-        ),
-
-        "suspicious_groups": (
-            matched_groups
-        ),
-
+        **summary,
+        "unique_functions": len(unique_functions),
+        "suspicious_groups": matched_groups,
         "suspicious_function_count": len(
             suspicious_functions
         ),
+        "category_count": len(matched_groups),
     }
 
 
@@ -463,100 +456,38 @@ def analyze_imports(
 # STRING INTELLIGENCE
 # ============================================================================
 
-def summarize_strings(
-    string_report: dict,
-) -> dict:
-    """
-    Produce a compact summary of the string-analysis
-    subsystem.
-    """
-    counts = string_report.get(
-        "counts",
-        {},
-    )
-
+def summarize_strings(string_report: dict[str, Any]) -> dict[str, Any]:
+    """Produce a compact, stable summary of the string-analysis subsystem."""
+    counts = string_report.get("counts", {})
     classifications = string_report.get(
         "classifications",
         {},
     )
 
+    def count_category(name: str) -> int:
+        value = classifications.get(name, [])
+        return len(value) if isinstance(value, list) else 0
+
     return {
-        "ascii": counts.get(
-            "ascii",
-            0,
+        "ascii": _safe_int(counts.get("ascii")),
+        "utf16le": _safe_int(counts.get("utf16le")),
+        "total_unique": _safe_int(
+            counts.get("total_unique")
         ),
-
-        "utf16le": counts.get(
-            "utf16le",
-            0,
+        "urls": count_category("urls"),
+        "ipv4": count_category("ipv4"),
+        "emails": count_category("emails"),
+        "windows_paths": count_category("windows_paths"),
+        "unc_paths": count_category("unc_paths"),
+        "registry_paths": count_category("registry_paths"),
+        "powershell_indicators": count_category(
+            "powershell_indicators"
         ),
-
-        "total_unique": counts.get(
-            "total_unique",
-            0,
+        "command_indicators": count_category(
+            "command_indicators"
         ),
-
-        "urls": len(
-            classifications.get(
-                "urls",
-                [],
-            )
-        ),
-
-        "ipv4": len(
-            classifications.get(
-                "ipv4",
-                [],
-            )
-        ),
-
-        "emails": len(
-            classifications.get(
-                "emails",
-                [],
-            )
-        ),
-
-        "windows_paths": len(
-            classifications.get(
-                "windows_paths",
-                [],
-            )
-        ),
-
-        "unc_paths": len(
-            classifications.get(
-                "unc_paths",
-                [],
-            )
-        ),
-
-        "registry_paths": len(
-            classifications.get(
-                "registry_paths",
-                [],
-            )
-        ),
-
-        "powershell_indicators": len(
-            classifications.get(
-                "powershell_indicators",
-                [],
-            )
-        ),
-
-        "command_indicators": len(
-            classifications.get(
-                "command_indicators",
-                [],
-            )
-        ),
-
-        "suspicious_apis": len(
-            classifications.get(
-                "suspicious_apis",
-                [],
-            )
+        "suspicious_apis": count_category(
+            "suspicious_apis"
         ),
     }
 
@@ -566,11 +497,9 @@ def summarize_strings(
 # ============================================================================
 
 def calculate_indicator_summary(
-    indicators: list[dict],
-) -> dict:
-    """
-    Aggregate indicator counts by severity.
-    """
+    indicators: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate static indicators by severity."""
     severity_counts = {
         "high": 0,
         "medium": 0,
@@ -580,16 +509,11 @@ def calculate_indicator_summary(
 
     for indicator in indicators:
         severity = str(
-            indicator.get(
-                "severity",
-                "info",
-            )
+            indicator.get("severity", "info")
         ).lower()
 
         if severity in severity_counts:
-            severity_counts[
-                severity
-            ] += 1
+            severity_counts[severity] += 1
 
     return {
         "total": len(indicators),
@@ -598,26 +522,92 @@ def calculate_indicator_summary(
 
 
 # ============================================================================
+# OVERLAY INTELLIGENCE
+# ============================================================================
+
+def calculate_overlay(
+    data: bytes,
+    sections: list[Any],
+    certificate_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Estimate file overlay data.
+
+    The security-directory/certificate table is treated as file-backed data,
+    so bytes after the later of the last section body and certificate table
+    are classified as overlay.
+    """
+    max_section_end = 0
+
+    for section in sections:
+        raw_size = _safe_int(
+            getattr(section, "raw_size", 0)
+        )
+
+        if raw_size:
+            raw_end = _safe_int(
+                getattr(section, "raw_end", 0)
+            )
+            if raw_end:
+                max_section_end = max(
+                    max_section_end,
+                    raw_end,
+                )
+
+    certificate_end = 0
+
+    if certificate_analysis.get("present", False):
+        certificate_offset = _safe_int(
+            certificate_analysis.get(
+                "file_offset"
+            )
+        )
+        certificate_size = _safe_int(
+            certificate_analysis.get("size")
+        )
+
+        if certificate_offset >= 0 and certificate_size >= 0:
+            certificate_end = (
+                certificate_offset
+                + certificate_size
+            )
+
+    file_backed_end = max(
+        max_section_end,
+        certificate_end,
+    )
+
+    overlay_size = max(
+        0,
+        len(data) - file_backed_end,
+    )
+
+    return {
+        "present": overlay_size > 0,
+        "offset": file_backed_end,
+        "size": overlay_size,
+    }
+
+
+# ============================================================================
 # RISK SCORING
 # ============================================================================
 
-def calculate_risk_score(
-    report: dict,
-) -> dict:
+def calculate_risk_score(report: dict[str, Any]) -> dict[str, Any]:
     """
     Produce a deterministic static-analysis score.
 
-    This is a prioritization aid, NOT a malware verdict.
+    The score is an explainable prioritization aid, not a malware verdict.
+    Every score contribution is represented in ``reasons`` so that the
+    displayed score can be reproduced from the report.
     """
     score = 0
-    reasons: list[dict] = []
+    reasons: list[dict[str, Any]] = []
 
-    def add(
-        points: int,
-        reason: str,
-    ) -> None:
+    def add(points: int, reason: str) -> None:
         nonlocal score
 
+        points = max(0, int(points))
         score += points
 
         reasons.append(
@@ -627,216 +617,141 @@ def calculate_risk_score(
             }
         )
 
-    section_data = report[
-        "section_intelligence"
-    ]
+    section_data = report["section_intelligence"]
+    section_flags = section_data["flags"]
 
-    if section_data[
-        "flags"
-    ][
-        "has_executable_writable_section"
-    ]:
+    if section_flags["has_executable_writable_section"]:
         add(
             25,
             "Executable and writable PE section detected.",
         )
 
-    if section_data[
-        "flags"
-    ][
-        "has_high_entropy_section"
-    ]:
+    if section_flags["has_high_entropy_section"]:
         add(
             15,
             "High-entropy PE section detected.",
         )
 
-    if section_data[
-        "flags"
-    ][
-        "has_empty_raw_section"
-    ]:
+    if section_flags["has_empty_raw_section"]:
         add(
             3,
             "Section has virtual data without a raw file body.",
         )
 
-    if section_data[
-        "flags"
-    ][
-        "has_unusual_section_name"
-    ]:
+    if section_flags["has_unusual_section_name"]:
         add(
             5,
             "Unusual PE section name detected.",
         )
 
-    import_data = report[
-        "import_intelligence"
-    ]
+    import_data = report["import_intelligence"]
 
-    for group_name in import_data[
-        "suspicious_groups"
-    ]:
-        if group_name == "process_injection":
-            add(
-                25,
-                "Process-injection-related API imports detected.",
-            )
+    import_points = {
+        "process_injection": (
+            25,
+            "Process-injection-related API imports detected.",
+        ),
+        "process_execution": (
+            15,
+            "Process-execution-related API imports detected.",
+        ),
+        "networking": (
+            10,
+            "Networking-related API imports detected.",
+        ),
+        "dynamic_loading": (
+            10,
+            "Dynamic loading APIs detected.",
+        ),
+        "memory_mapping": (
+            5,
+            "Memory-mapping APIs detected.",
+        ),
+        "anti_analysis": (
+            10,
+            "Anti-analysis/debugger-detection APIs detected.",
+        ),
+    }
 
-        elif group_name == "process_execution":
-            add(
-                15,
-                "Process-execution-related API imports detected.",
-            )
+    for group_name in import_data.get(
+        "suspicious_groups",
+        {},
+    ):
+        if group_name in import_points:
+            points, reason = import_points[group_name]
+            add(points, reason)
 
-        elif group_name == "networking":
-            add(
-                10,
-                "Networking-related API imports detected.",
-            )
+    string_data = report["strings"]["summary"]
 
-        elif group_name == "dynamic_loading":
-            add(
-                10,
-                "Dynamic loading APIs detected.",
-            )
-
-        elif group_name == "memory_mapping":
-            add(
-                5,
-                "Memory-mapping APIs detected.",
-            )
-
-        elif group_name == "anti_analysis":
-            add(
-                10,
-                "Anti-analysis/debugger-detection APIs detected.",
-            )
-
-    string_data = report[
-        "strings"
-    ][
-        "summary"
-    ]
-
-    if string_data[
-        "powershell_indicators"
-    ]:
-        add(
+    string_points = {
+        "powershell_indicators": (
             20,
             "PowerShell-related string artifacts detected.",
-        )
-
-    if string_data[
-        "command_indicators"
-    ]:
-        add(
+        ),
+        "command_indicators": (
             10,
             "Command-execution-related string artifacts detected.",
-        )
-
-    if string_data[
-        "urls"
-    ]:
-        add(
+        ),
+        "urls": (
             5,
             "URL artifacts detected.",
-        )
-
-    if string_data[
-        "ipv4"
-    ]:
-        add(
+        ),
+        "ipv4": (
             5,
             "IPv4 artifacts detected.",
-        )
-
-    if string_data[
-        "registry_paths"
-    ]:
-        add(
+        ),
+        "registry_paths": (
             5,
             "Registry path artifacts detected.",
-        )
-
-    if string_data[
-        "suspicious_apis"
-    ]:
-        add(
+        ),
+        "suspicious_apis": (
             10,
             "Suspicious API names detected in static strings.",
-        )
+        ),
+    }
 
-    indicator_counts = report[
-        "indicator_summary"
-    ][
-        "by_severity"
-    ]
+    for key, (points, reason) in string_points.items():
+        if string_data.get(key, 0):
+            add(points, reason)
+
+    indicator_counts = report["indicator_summary"]["by_severity"]
 
     if indicator_counts["high"]:
-        points = (
-            indicator_counts["high"]
-            * 15
-        )
-
-        score += points
-
-        reasons.append(
-            {
-                "points": points,
-                "reason": (
-                    "High-severity static indicators "
-                    "were generated."
-                ),
-            }
+        add(
+            indicator_counts["high"] * 15,
+            "High-severity static indicators were generated.",
         )
 
     if indicator_counts["medium"]:
-        points = (
-            indicator_counts["medium"]
-            * 7
-        )
-
-        score += points
-
-        reasons.append(
-            {
-                "points": points,
-                "reason": (
-                    "Medium-severity static indicators "
-                    "were generated."
-                ),
-            }
+        add(
+            indicator_counts["medium"] * 7,
+            "Medium-severity static indicators were generated.",
         )
 
     if indicator_counts["low"]:
-        points = (
-            indicator_counts["low"]
-            * 2
+        add(
+            indicator_counts["low"] * 2,
+            "Low-severity static indicators were generated.",
         )
 
-        score += points
-
+    # An overlay alone is not treated as malicious. It is reported for
+    # analyst review, but contributes no automatic risk points.
+    if report["overlay"]["present"]:
         reasons.append(
             {
-                "points": points,
+                "points": 0,
                 "reason": (
-                    "Low-severity static indicators "
-                    "were generated."
+                    "File overlay detected; reported for analyst review "
+                    "without automatic risk points."
                 ),
             }
         )
 
-    score = max(
-        0,
-        min(
-            score,
-            100,
-        ),
-    )
+    score = max(0, min(score, 100))
 
-    if score >= 70:
+    if score >= 80:
+        rating = "CRITICAL"
+    elif score >= 70:
         rating = "HIGH"
     elif score >= 40:
         rating = "MEDIUM"
@@ -849,8 +764,8 @@ def calculate_risk_score(
         "score": score,
         "rating": rating,
         "method": (
-            "Deterministic static observation scoring; "
-            "not a malware verdict."
+            "Deterministic static observation scoring with "
+            "explainable additive reasons; not a malware verdict."
         ),
         "reasons": reasons,
     }
@@ -860,49 +775,56 @@ def calculate_risk_score(
 # REPORT BUILDER
 # ============================================================================
 
-def build_report(
-    path: Path,
-) -> dict:
+def build_report(path: Path) -> dict[str, Any]:
     """
     Build the complete SECURITY-MISC PE report.
 
-    The target file is read as bytes and analyzed statically.
+    The target is read as bytes and analyzed statically.
     It is never executed.
     """
     started = time.perf_counter()
 
-    path = (
-        Path(path)
-        .expanduser()
-        .resolve()
-    )
+    path = Path(path).expanduser().resolve()
 
-    data, headers = load_pe(
-        path
-    )
+    if not path.exists():
+        raise FileNotFoundError(
+            f"File not found: {path}"
+        )
+
+    if not path.is_file():
+        raise ValueError(
+            f"Not a regular file: {path}"
+        )
+
+    file_size = path.stat().st_size
+
+    if file_size > MAX_FILE_SIZE_BYTES:
+        raise ValueError(
+            "Input file exceeds the analyzer safety limit "
+            f"of {MAX_FILE_SIZE_BYTES:,} bytes."
+        )
+
+    data, headers = load_pe(path)
+
+    if not data:
+        raise ValueError("PE file is empty.")
+
+    if len(data) != file_size:
+        file_size = len(data)
 
     # ------------------------------------------------------------------------
     # File identity
     # ------------------------------------------------------------------------
 
-    hashes = calculate_hashes(
-        data
-    )
+    hashes = calculate_hashes(data)
 
     # ------------------------------------------------------------------------
     # PE basics
     # ------------------------------------------------------------------------
 
-    optional_offset = (
-        headers.pe_offset
-        + 4
-        + 20
-    )
+    optional_offset = headers.pe_offset + 4 + 20
 
-    is_64_bit = (
-        headers.optional_magic
-        == 0x20B
-    )
+    is_64_bit = headers.optional_magic == 0x20B
 
     # ------------------------------------------------------------------------
     # Sections
@@ -919,11 +841,9 @@ def build_report(
         headers.number_of_sections,
     )
 
-    section_intelligence = (
-        analyze_sections(
-            sections,
-            headers.entry_point_rva,
-        )
+    section_intelligence = analyze_sections(
+        sections,
+        headers.entry_point_rva,
     )
 
     # ------------------------------------------------------------------------
@@ -934,27 +854,17 @@ def build_report(
         data=data,
         optional_offset=optional_offset,
         is_64_bit=is_64_bit,
-        optional_header_size=(
-            headers.size_of_optional_header
-        ),
+        optional_header_size=headers.size_of_optional_header,
     )
 
-    import_directory = next(
-        (
-            item
-            for item in directories
-            if item["index"] == 1
-        ),
-        None,
+    import_directory = _directory_by_index(
+        directories,
+        1,
     )
 
-    export_directory = next(
-        (
-            item
-            for item in directories
-            if item["index"] == 0
-        ),
-        None,
+    export_directory = _directory_by_index(
+        directories,
+        0,
     )
 
     # ------------------------------------------------------------------------
@@ -964,16 +874,12 @@ def build_report(
     imports = parse_imports(
         data=data,
         import_rva=(
-            import_directory[
-                "virtual_address"
-            ]
+            import_directory["virtual_address"]
             if import_directory
             else 0
         ),
         import_size=(
-            import_directory[
-                "size"
-            ]
+            import_directory["size"]
             if import_directory
             else 0
         ),
@@ -981,11 +887,7 @@ def build_report(
         is_64_bit=is_64_bit,
     )
 
-    import_intelligence = (
-        analyze_imports(
-            imports
-        )
-    )
+    import_intelligence = analyze_imports(imports)
 
     # ------------------------------------------------------------------------
     # Exports
@@ -994,9 +896,7 @@ def build_report(
     exports = parse_exports(
         data=data,
         export_rva=(
-            export_directory[
-                "virtual_address"
-            ]
+            export_directory["virtual_address"]
             if export_directory
             else 0
         ),
@@ -1007,58 +907,34 @@ def build_report(
     # Certificates
     # ------------------------------------------------------------------------
 
-    certificate_analysis = (
-        parse_certificate_table(
-            data
-        )
-    )
-
-    certificate_summary = (
-        summarize_certificates(
-            certificate_analysis
-        )
+    certificate_analysis = parse_certificate_table(data)
+    certificate_summary = summarize_certificates(
+        certificate_analysis
     )
 
     # ------------------------------------------------------------------------
     # Strings
     # ------------------------------------------------------------------------
 
-    string_report = analyze_strings_file(
-        path
-    )
-
-    string_summary = summarize_strings(
-        string_report
-    )
+    string_report = analyze_strings_file(path)
+    string_summary = summarize_strings(string_report)
 
     # ------------------------------------------------------------------------
     # Base report
-    #
-    # Keep compatibility with the earlier report:
-    #   report["file"]      -> string
-    #   report["size_bytes"] -> integer
-    #
-    # Rich file information lives under file_metadata.
     # ------------------------------------------------------------------------
 
-    report = {
-        "tool": "SECURITY-MISC",
-        "module": "pe_analyzer",
-        "analysis_version": (
-            ANALYSIS_VERSION
-        ),
-
-        "analysis_time": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        ),
+    report: dict[str, Any] = {
+        "tool": ENGINE_NAME,
+        "module": ENGINE_MODULE,
+        "analysis_version": ANALYSIS_VERSION,
+        "analysis_time": datetime.now(
+            timezone.utc
+        ).isoformat(),
 
         # Backward-compatible fields.
         "file": str(path),
         "size_bytes": len(data),
 
-        # Extended file metadata.
         "file_metadata": {
             "path": str(path),
             "name": path.name,
@@ -1073,47 +949,42 @@ def build_report(
             "dos_magic": "MZ",
             "pe_signature": "PE\\x00\\x00",
             "pe_offset": headers.pe_offset,
-
             "machine": headers.machine_name,
-
-            "machine_code": (
-                f"0x{headers.machine:04X}"
+            "machine_code": _format_hex(
+                headers.machine,
+                4,
             ),
-
             "bitness": headers.bitness,
-
             "number_of_sections": (
                 headers.number_of_sections
             ),
-
             "timestamp_raw": headers.timestamp,
-
+            "timestamp_utc": _timestamp_to_iso(
+                headers.timestamp
+            ),
             "pointer_to_symbol_table": (
                 headers.pointer_to_symbol_table
             ),
-
             "number_of_symbols": (
                 headers.number_of_symbols
             ),
-
-            "optional_header_magic": (
-                f"0x{headers.optional_magic:03X}"
+            "optional_header_magic": _format_hex(
+                headers.optional_magic,
+                3,
             ),
-
             "optional_header_size": (
                 headers.size_of_optional_header
             ),
-
-            "characteristics": (
-                f"0x{headers.characteristics:04X}"
+            "characteristics": _format_hex(
+                headers.characteristics,
+                4,
             ),
-
-            "entry_point_rva": (
-                f"0x{headers.entry_point_rva:08X}"
+            "entry_point_rva": _format_hex(
+                headers.entry_point_rva,
+                8,
             ),
-
-            "image_base": (
-                f"0x{headers.image_base:X}"
+            "image_base": _format_hex(
+                headers.image_base
             ),
         },
 
@@ -1124,40 +995,29 @@ def build_report(
             for section in sections
         ],
 
-        "section_intelligence": (
-            section_intelligence
-        ),
+        "section_intelligence": section_intelligence,
 
+        # Preserve the existing report shape.
         "imports": {
             **import_intelligence,
             "libraries": imports,
         },
 
-        "import_intelligence": (
-            import_intelligence
-        ),
+        "import_intelligence": import_intelligence,
 
         "exports": {
             "count": len(exports),
             "functions": exports,
         },
 
-        "certificate_analysis": (
-            certificate_analysis
-        ),
-
-        "certificate_summary": (
-            certificate_summary
-        ),
+        "certificate_analysis": certificate_analysis,
+        "certificate_summary": certificate_summary,
 
         "strings": {
             "summary": string_summary,
-
-            "classifications": (
-                string_report.get(
-                    "classifications",
-                    {},
-                )
+            "classifications": string_report.get(
+                "classifications",
+                {},
             ),
         },
     }
@@ -1166,100 +1026,69 @@ def build_report(
     # Overlay
     # ------------------------------------------------------------------------
 
-    max_section_end = 0
-
-    for section in sections:
-        if section.raw_size:
-            max_section_end = max(
-                max_section_end,
-                section.raw_end,
-            )
-
-    certificate_end = 0
-
-    if certificate_analysis.get(
-        "present",
-        False,
-    ):
-        certificate_end = (
-            certificate_analysis[
-                "file_offset"
-            ]
-            + certificate_analysis[
-                "size"
-            ]
-        )
-
-    file_backed_end = max(
-        max_section_end,
-        certificate_end,
+    report["overlay"] = calculate_overlay(
+        data,
+        sections,
+        certificate_analysis,
     )
-
-    overlay_size = max(
-        0,
-        len(data) - file_backed_end,
-    )
-
-    report["overlay"] = {
-        "present": overlay_size > 0,
-        "offset": file_backed_end,
-        "size": overlay_size,
-    }
 
     # ------------------------------------------------------------------------
     # Indicators
     # ------------------------------------------------------------------------
 
-    indicators = generate_indicators(
-        report
-    )
+    indicators = generate_indicators(report)
 
     report["indicators"] = indicators
-
     report["indicator_summary"] = (
-        calculate_indicator_summary(
-            indicators
-        )
+        calculate_indicator_summary(indicators)
     )
 
     # ------------------------------------------------------------------------
     # Risk
     # ------------------------------------------------------------------------
 
-    report["risk_assessment"] = (
-        calculate_risk_score(
-            report
-        )
+    report["risk_assessment"] = calculate_risk_score(
+        report
     )
 
     # ------------------------------------------------------------------------
     # Performance metrics
     # ------------------------------------------------------------------------
 
-    duration = (
-        time.perf_counter()
-        - started
-    )
+    duration = time.perf_counter() - started
 
     report["analysis_metrics"] = {
         "duration_seconds": round(
             duration,
             4,
         ),
-
         "bytes_processed": len(data),
-
         "throughput_mb_per_second": round(
             (
-                len(data)
-                / 1024
-                / 1024
-                / duration
-            )
-            if duration > 0
-            else 0.0,
+                len(data) / 1024 / 1024 / duration
+                if duration > 0
+                else 0.0
+            ),
             2,
         ),
+    }
+
+    # ------------------------------------------------------------------------
+    # Engine summary
+    # ------------------------------------------------------------------------
+
+    report["analysis_summary"] = {
+        "static_only": True,
+        "execution_performed": False,
+        "sections_analyzed": len(sections),
+        "imports_analyzed": len(imports),
+        "exports_analyzed": len(exports),
+        "data_directories_analyzed": len(
+            directories
+        ),
+        "indicators_generated": len(indicators),
+        "risk_score": report["risk_assessment"]["score"],
+        "risk_rating": report["risk_assessment"]["rating"],
     }
 
     return report
@@ -1270,100 +1099,56 @@ def build_report(
 # ============================================================================
 
 def print_report(
-    report: dict,
+    report: dict[str, Any],
     string_limit: int = 20,
 ) -> None:
-    headers = report[
-        "headers"
-    ]
-
-    certificate = report[
-        "certificate_analysis"
-    ]
-
-    certificate_summary = report[
-        "certificate_summary"
-    ]
-
-    imports = report[
-        "imports"
-    ]
-
-    import_intelligence = report[
-        "import_intelligence"
-    ]
-
-    exports = report[
-        "exports"
-    ]
-
-    overlay = report[
-        "overlay"
-    ]
-
-    strings = report[
-        "strings"
-    ]
-
-    string_summary = strings[
-        "summary"
-    ]
-
-    sections = report[
-        "section_intelligence"
-    ]
-
-    indicators = report[
-        "indicators"
-    ]
-
-    indicator_summary = report[
-        "indicator_summary"
-    ]
-
-    risk = report[
-        "risk_assessment"
-    ]
-
-    metrics = report[
-        "analysis_metrics"
-    ]
+    """Print a human-readable static-analysis report."""
+    headers = report["headers"]
+    certificate = report["certificate_analysis"]
+    certificate_summary = report["certificate_summary"]
+    imports = report["imports"]
+    import_intelligence = report["import_intelligence"]
+    exports = report["exports"]
+    overlay = report["overlay"]
+    strings = report["strings"]
+    string_summary = strings["summary"]
+    sections = report["section_intelligence"]
+    indicators = report["indicators"]
+    indicator_summary = report["indicator_summary"]
+    risk = report["risk_assessment"]
+    metrics = report["analysis_metrics"]
 
     print()
     print("=" * 100)
     print(
-        "SECURITY-MISC :: PE STATIC ANALYSIS ENGINE"
+        f"{ENGINE_NAME} :: PE STATIC ANALYSIS ENGINE"
     )
     print("=" * 100)
 
-    print(
-        f"File             : "
-        f"{report['file']}"
-    )
-
+    print(f"File             : {report['file']}")
     print(
         f"Size             : "
         f"{report['size_bytes']:,} bytes"
     )
-
     print(
         f"MD5              : "
         f"{report['hashes']['md5']}"
     )
-
     print(
         f"SHA-1            : "
         f"{report['hashes']['sha1']}"
     )
-
     print(
         f"SHA-256          : "
         f"{report['hashes']['sha256']}"
     )
-
     print(
         f"Analysis version : "
         f"{report['analysis_version']}"
+    )
+    print(
+        "Execution        : NEVER "
+        "(static byte analysis only)"
     )
 
     # ------------------------------------------------------------------------
@@ -1378,35 +1163,37 @@ def print_report(
         f"Architecture     : "
         f"{headers['machine']}"
     )
-
+    print(
+        f"Machine code     : "
+        f"{headers['machine_code']}"
+    )
     print(
         f"Format           : "
         f"{headers['bitness']}"
     )
-
     print(
         f"Sections         : "
         f"{headers['number_of_sections']}"
     )
-
     print(
         f"PE offset        : "
-        f"0x{headers['pe_offset']:X}"
+        f"{_format_hex(headers['pe_offset'])}"
     )
-
     print(
         f"Entry point RVA  : "
         f"{headers['entry_point_rva']}"
     )
-
     print(
         f"Image base       : "
         f"{headers['image_base']}"
     )
-
     print(
         f"Characteristics  : "
         f"{headers['characteristics']}"
+    )
+    print(
+        f"Timestamp UTC    : "
+        f"{headers['timestamp_utc'] or 'Unknown'}"
     )
 
     # ------------------------------------------------------------------------
@@ -1418,7 +1205,7 @@ def print_report(
     print("-" * 100)
 
     print(
-        f"{'NAME':<10}"
+        f"{'NAME':<12}"
         f"{'VIRT SIZE':>12}"
         f"{'RAW SIZE':>12}"
         f"{'RVA':>12}"
@@ -1426,16 +1213,14 @@ def print_report(
         f"  FLAGS"
     )
 
-    for section in report[
-        "sections"
-    ]:
+    for section in report["sections"]:
         print(
-            f"{section['name']:<10}"
-            f"{section['virtual_size']:>12,}"
-            f"{section['raw_size']:>12,}"
-            f"{section['virtual_address']:>12X}"
-            f"{section['entropy']:>10.4f}"
-            f"  {section['characteristics']}"
+            f"{str(section['name']):<12}"
+            f"{_safe_int(section.get('virtual_size')):>12,}"
+            f"{_safe_int(section.get('raw_size')):>12,}"
+            f"{_safe_int(section.get('virtual_address')):>12X}"
+            f"{float(section.get('entropy', 0.0)):>10.4f}"
+            f"  {section.get('characteristics', '')}"
         )
 
     print()
@@ -1444,34 +1229,28 @@ def print_report(
 
     print(
         f"Entry-point section      : "
-        f"{sections['entry_point_section']}"
+        f"{sections['entry_point_section'] or 'Unknown'}"
     )
-
     print(
         f"Executable sections      : "
         f"{len(sections['executable_sections'])}"
     )
-
     print(
         f"Writable sections        : "
         f"{len(sections['writable_sections'])}"
     )
-
     print(
         f"Executable + writable    : "
         f"{len(sections['executable_writable_sections'])}"
     )
-
     print(
         f"High entropy sections    : "
         f"{len(sections['high_entropy_sections'])}"
     )
-
     print(
         f"Empty raw sections       : "
         f"{len(sections['empty_raw_sections'])}"
     )
-
     print(
         f"Unusual section names    : "
         f"{len(sections['unusual_names'])}"
@@ -1487,29 +1266,17 @@ def print_report(
 
     active_directories = [
         directory
-        for directory in report[
-            "data_directories"
-        ]
-        if (
-            directory[
-                "virtual_address"
-            ]
-            or directory["size"]
-        )
+        for directory in report["data_directories"]
+        if directory.get("present")
     ]
 
     if not active_directories:
-        print(
-            "[+] No populated data directories."
-        )
-
+        print("[+] No populated data directories.")
     else:
-        for directory in (
-            active_directories
-        ):
+        for directory in active_directories:
             print(
                 f"{directory['name']:<20}"
-                f"Address/Offset: "
+                f"RVA/Offset: "
                 f"0x{directory['virtual_address']:08X}  "
                 f"Size: "
                 f"{directory['size']:,}"
@@ -1525,39 +1292,33 @@ def print_report(
 
     print(
         f"DLLs             : "
-        f"{imports['dll_count']}"
+        f"{imports.get('dll_count', 0)}"
     )
-
     print(
         f"Functions        : "
-        f"{imports['function_count']}"
+        f"{imports.get('function_count', 0)}"
     )
-
     print(
         f"Unique functions : "
         f"{import_intelligence['unique_functions']}"
     )
-
     print(
         f"Suspicious APIs  : "
         f"{import_intelligence['suspicious_function_count']}"
     )
+    print(
+        f"Matched categories: "
+        f"{import_intelligence['category_count']}"
+    )
 
-    if import_intelligence[
-        "suspicious_groups"
-    ]:
+    if import_intelligence["suspicious_groups"]:
         print()
-        print(
-            "IMPORT CATEGORIES"
-        )
+        print("IMPORT CATEGORIES")
         print("-" * 100)
 
-        for (
-            group_name,
-            functions,
-        ) in import_intelligence[
-            "suspicious_groups"
-        ].items():
+        for group_name, functions in (
+            import_intelligence["suspicious_groups"].items()
+        ):
             print(
                 f"{group_name:<24}: "
                 f"{', '.join(functions)}"
@@ -1567,27 +1328,25 @@ def print_report(
     print("IMPORT TABLE")
     print("-" * 100)
 
-    for library in imports[
-        "libraries"
-    ]:
-        print(
-            f"\n  {library['dll']} "
-            f"({library['function_count']} functions)"
+    for library in imports.get("libraries", []):
+        dll = library.get("dll", "<unknown>")
+        function_count = _safe_int(
+            library.get("function_count")
         )
 
-        for function in library[
-            "functions"
-        ][:30]:
-            print(
-                f"    {function}"
-            )
+        print(
+            f"\n  {dll} "
+            f"({function_count} functions)"
+        )
 
-        if library[
-            "function_count"
-        ] > 30:
-            print(
-                "    ..."
-            )
+        for function in library.get(
+            "functions",
+            [],
+        )[:MAX_IMPORT_FUNCTIONS_DISPLAY]:
+            print(f"    {function}")
+
+        if function_count > MAX_IMPORT_FUNCTIONS_DISPLAY:
+            print("    ...")
 
     # ------------------------------------------------------------------------
     # Exports
@@ -1604,17 +1363,11 @@ def print_report(
 
     for function in exports[
         "functions"
-    ][:50]:
-        print(
-            f"  {function}"
-        )
+    ][:MAX_EXPORTS_DISPLAY]:
+        print(f"  {function}")
 
-    if exports[
-        "count"
-    ] > 50:
-        print(
-            "  ..."
-        )
+    if exports["count"] > MAX_EXPORTS_DISPLAY:
+        print("  ...")
 
     # ------------------------------------------------------------------------
     # Certificate analysis
@@ -1624,51 +1377,37 @@ def print_report(
     print("CERTIFICATE ANALYSIS")
     print("-" * 100)
 
-    if certificate.get(
-        "present",
-        False,
-    ):
-        print(
-            "[+] PE certificate table detected."
-        )
-
+    if certificate.get("present", False):
+        print("[+] PE certificate table detected.")
         print(
             f"    Offset        : "
-            f"0x{certificate['file_offset']:X}"
+            f"0x{_safe_int(certificate.get('file_offset')):X}"
         )
-
         print(
             f"    Size          : "
-            f"{certificate['size']:,} bytes"
+            f"{_safe_int(certificate.get('size')):,} bytes"
         )
-
         print(
             f"    Entries       : "
-            f"{certificate_summary['entry_count']}"
+            f"{certificate_summary.get('entry_count', 0)}"
         )
-
         print(
             f"    PKCS entries  : "
-            f"{certificate_summary['pkcs_signed_entries']}"
+            f"{certificate_summary.get('pkcs_signed_entries', 0)}"
         )
 
         for index, entry in enumerate(
-            certificate[
-                "entries"
-            ],
+            certificate.get("entries", []),
             start=1,
         ):
             print(
                 f"    Entry {index}: "
-                f"Type={entry['type']} "
-                f"Revision={entry['revision']} "
-                f"PKCS={entry['is_pkcs_signed_data']}"
+                f"Type={entry.get('type')} "
+                f"Revision={entry.get('revision')} "
+                f"PKCS={entry.get('is_pkcs_signed_data')}"
             )
-
     else:
-        print(
-            "[-] No PE certificate table detected."
-        )
+        print("[-] No PE certificate table detected.")
 
     # ------------------------------------------------------------------------
     # Overlay
@@ -1682,12 +1421,10 @@ def print_report(
         f"Present          : "
         f"{overlay['present']}"
     )
-
     print(
         f"Offset           : "
         f"0x{overlay['offset']:X}"
     )
-
     print(
         f"Size             : "
         f"{overlay['size']:,} bytes"
@@ -1701,69 +1438,28 @@ def print_report(
     print("STRING INTELLIGENCE")
     print("-" * 100)
 
-    print(
-        f"ASCII strings    : "
-        f"{string_summary['ascii']}"
-    )
-
-    print(
-        f"UTF-16LE strings : "
-        f"{string_summary['utf16le']}"
-    )
-
-    print(
-        f"Unique strings   : "
-        f"{string_summary['total_unique']}"
-    )
-
-    print(
-        f"URLs             : "
-        f"{string_summary['urls']}"
-    )
-
-    print(
-        f"IPv4 addresses   : "
-        f"{string_summary['ipv4']}"
-    )
-
-    print(
-        f"Email-like       : "
-        f"{string_summary['emails']}"
-    )
-
-    print(
-        f"Windows paths    : "
-        f"{string_summary['windows_paths']}"
-    )
-
-    print(
-        f"UNC paths        : "
-        f"{string_summary['unc_paths']}"
-    )
-
-    print(
-        f"Registry paths   : "
-        f"{string_summary['registry_paths']}"
-    )
-
-    print(
-        f"PowerShell hits  : "
-        f"{string_summary['powershell_indicators']}"
-    )
-
-    print(
-        f"Command hits     : "
-        f"{string_summary['command_indicators']}"
-    )
-
-    print(
-        f"Suspicious APIs  : "
-        f"{string_summary['suspicious_apis']}"
-    )
-
-    classifications = strings[
-        "classifications"
+    string_labels = [
+        ("ASCII strings", "ascii"),
+        ("UTF-16LE strings", "utf16le"),
+        ("Unique strings", "total_unique"),
+        ("URLs", "urls"),
+        ("IPv4 addresses", "ipv4"),
+        ("Email-like", "emails"),
+        ("Windows paths", "windows_paths"),
+        ("UNC paths", "unc_paths"),
+        ("Registry paths", "registry_paths"),
+        ("PowerShell hits", "powershell_indicators"),
+        ("Command hits", "command_indicators"),
+        ("Suspicious APIs", "suspicious_apis"),
     ]
+
+    for label, key in string_labels:
+        print(
+            f"{label:<18}: "
+            f"{string_summary.get(key, 0)}"
+        )
+
+    classifications = strings["classifications"]
 
     display_categories = [
         ("URLS", "urls"),
@@ -1771,10 +1467,7 @@ def print_report(
         ("EMAILS", "emails"),
         ("WINDOWS PATHS", "windows_paths"),
         ("UNC PATHS", "unc_paths"),
-        (
-            "REGISTRY PATHS",
-            "registry_paths",
-        ),
+        ("REGISTRY PATHS", "registry_paths"),
         (
             "POWERSHELL INDICATORS",
             "powershell_indicators",
@@ -1789,13 +1482,8 @@ def print_report(
         ),
     ]
 
-    for title, key in (
-        display_categories
-    ):
-        values = classifications.get(
-            key,
-            [],
-        )
+    for title, key in display_categories:
+        values = classifications.get(key, [])
 
         if not values:
             continue
@@ -1804,12 +1492,8 @@ def print_report(
         print(title)
         print("-" * 100)
 
-        for value in values[
-            :string_limit
-        ]:
-            print(
-                f"  {value}"
-            )
+        for value in values[:string_limit]:
+            print(f"  {value}")
 
         if len(values) > string_limit:
             print(
@@ -1825,36 +1509,25 @@ def print_report(
     print("STATIC INDICATORS")
     print("-" * 100)
 
+    for severity in (
+        "high",
+        "medium",
+        "low",
+        "info",
+    ):
+        print(
+            f"{severity.capitalize():<17}: "
+            f"{indicator_summary['by_severity'][severity]}"
+        )
+
     print(
-        f"Total            : "
+        f"{'Total':<17}: "
         f"{indicator_summary['total']}"
-    )
-
-    print(
-        f"High             : "
-        f"{indicator_summary['by_severity']['high']}"
-    )
-
-    print(
-        f"Medium           : "
-        f"{indicator_summary['by_severity']['medium']}"
-    )
-
-    print(
-        f"Low              : "
-        f"{indicator_summary['by_severity']['low']}"
-    )
-
-    print(
-        f"Info             : "
-        f"{indicator_summary['by_severity']['info']}"
     )
 
     if not indicators:
         print()
-        print(
-            "[+] No static indicators generated."
-        )
+        print("[+] No static indicators generated.")
     else:
         print()
 
@@ -1867,10 +1540,9 @@ def print_report(
             ).upper()
 
             print(
-                f"[{severity:<6}] "
+                f"[{severity:<8}] "
                 f"{indicator.get('name', 'Unnamed')}"
             )
-
             print(
                 f"         "
                 f"{indicator.get('description', '')}"
@@ -1888,29 +1560,26 @@ def print_report(
         f"Score            : "
         f"{risk['score']}/100"
     )
-
     print(
         f"Rating           : "
         f"{risk['rating']}"
     )
-
     print(
         f"Method           : "
         f"{risk['method']}"
     )
 
-    if risk[
-        "reasons"
-    ]:
+    if risk["reasons"]:
         print()
         print("Reasons:")
 
-        for reason in risk[
-            "reasons"
-        ]:
+        for reason in risk["reasons"]:
+            points = _safe_int(reason.get("points"))
+
+            prefix = "+" if points else " "
             print(
-                f"  +{reason['points']:>3}  "
-                f"{reason['reason']}"
+                f"  {prefix}{points:>3}  "
+                f"{reason.get('reason', '')}"
             )
 
     # ------------------------------------------------------------------------
@@ -1925,12 +1594,10 @@ def print_report(
         f"Duration         : "
         f"{metrics['duration_seconds']:.4f}s"
     )
-
     print(
         f"Bytes processed  : "
         f"{metrics['bytes_processed']:,}"
     )
-
     print(
         f"Throughput       : "
         f"{metrics['throughput_mb_per_second']:.2f} MB/s"
@@ -1945,17 +1612,11 @@ def print_report(
 # ============================================================================
 
 def save_report(
-    report: dict,
+    report: dict[str, Any],
     output: Path,
 ) -> None:
-    """
-    Write the complete report as JSON.
-    """
-    output = (
-        Path(output)
-        .expanduser()
-        .resolve()
-    )
+    """Write the complete report as UTF-8 JSON."""
+    output = Path(output).expanduser().resolve()
 
     output.parent.mkdir(
         parents=True,
@@ -1971,9 +1632,7 @@ def save_report(
         encoding="utf-8",
     )
 
-    print(
-        f"[+] JSON report: {output}"
-    )
+    print(f"[+] JSON report: {output}")
 
 
 # ============================================================================
@@ -1984,8 +1643,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="security-misc-pe",
         description=(
-            "SECURITY-MISC read-only "
-            "Windows PE static-analysis engine."
+            "SECURITY-MISC read-only Windows PE "
+            "static-analysis engine."
+        ),
+        epilog=(
+            "Safety: the target file is read and analyzed as bytes; "
+            "it is never executed."
         ),
     )
 
@@ -1997,10 +1660,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         type=Path,
-        help=(
-            "Write the complete analysis "
-            "report to JSON."
-        ),
+        help="Write the complete analysis report to JSON.",
     )
 
     parser.add_argument(
@@ -2022,7 +1682,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_parser()
-
     args = parser.parse_args()
 
     if args.string_limit < 1:
@@ -2030,28 +1689,18 @@ def main() -> int:
             "--string-limit must be greater than zero."
         )
 
-    path = (
-        Path(args.file)
-        .expanduser()
-        .resolve()
-    )
+    path = Path(args.file).expanduser().resolve()
 
     if not path.exists():
-        print(
-            f"[!] File not found: {path}"
-        )
+        print(f"[!] File not found: {path}")
         return 2
 
     if not path.is_file():
-        print(
-            f"[!] Not a regular file: {path}"
-        )
+        print(f"[!] Not a regular file: {path}")
         return 2
 
     try:
-        report = build_report(
-            path
-        )
+        report = build_report(path)
 
         print_report(
             report,
@@ -2067,27 +1716,25 @@ def main() -> int:
         return 0
 
     except PermissionError:
-        print(
-            f"[!] Permission denied: {path}"
-        )
+        print(f"[!] Permission denied: {path}")
         return 3
 
+    except FileNotFoundError as exc:
+        print(f"[!] File not found: {exc}")
+        return 2
+
     except OSError as exc:
-        print(
-            f"[!] File-system error: {exc}"
-        )
+        print(f"[!] File-system error: {exc}")
         return 3
 
     except ValueError as exc:
-        print(
-            f"[!] PE parsing error: {exc}"
-        )
+        print(f"[!] PE parsing error: {exc}")
         return 4
 
     except Exception as exc:
         print(
             "[!] Unexpected analyzer error: "
-            f"{exc}"
+            f"{type(exc).__name__}: {exc}"
         )
         return 1
 
