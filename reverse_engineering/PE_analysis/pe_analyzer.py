@@ -29,7 +29,7 @@ from reverse_engineering.strings.string_analyzer import (
 # VERSION / ENGINE METADATA
 # ============================================================================
 
-ANALYSIS_VERSION = "0.10.0"
+ANALYSIS_VERSION = "0.11.0"
 ENGINE_NAME = "SECURITY-MISC"
 ENGINE_MODULE = "pe_analyzer"
 
@@ -47,6 +47,66 @@ MAX_HASH_INPUT_BYTES = MAX_FILE_SIZE_BYTES
 # Evidence thresholds are intentionally conservative. They describe
 # observations; they do not establish malicious intent.
 HIGH_ENTROPY_THRESHOLD = 7.2
+
+# Reporting metadata.
+REPORT_SCHEMA_VERSION = "1.1"
+MAX_TOP_FINDINGS = 10
+
+RISK_RATING_ORDER = {
+    "MINIMAL": 0,
+    "LOW": 1,
+    "MEDIUM": 2,
+    "HIGH": 3,
+    "CRITICAL": 4,
+}
+
+SECTION_FINDING_META = {
+    "has_executable_writable_section": (
+        "Executable and writable section",
+        "A section is marked both executable and writable; this can be legitimate, but it is an important memory-protection observation.",
+        "high",
+    ),
+    "has_high_entropy_section": (
+        "High-entropy section",
+        "A PE section has entropy at or above the configured threshold; compression or packing can cause this, although high entropy is not proof of packing.",
+        "medium",
+    ),
+    "has_empty_raw_section": (
+        "Virtual-only section data",
+        "A section has virtual data without a corresponding raw file body.",
+        "low",
+    ),
+    "has_unusual_section_name": (
+        "Unusual section name",
+        "A section name is outside the analyzer's common PE section-name set.",
+        "low",
+    ),
+    "entry_point_in_executable_section": (
+        "Entry point is executable",
+        "The PE entry point maps to an executable section.",
+        "info",
+    ),
+}
+
+IMPORT_FINDING_META = {
+    "process_injection": ("Process-injection API group", "Multiple process-injection-related APIs are imported.", "high"),
+    "process_access": ("Process-access API", "The import table contains an API used to access another process.", "low"),
+    "memory_operations": ("Memory-management API", "The import table contains virtual-memory allocation/protection APIs.", "low"),
+    "process_execution": ("Process-execution API group", "The import table contains APIs capable of starting or launching processes.", "medium"),
+    "networking": ("Networking API group", "The import table contains APIs associated with network communication.", "medium"),
+    "dynamic_loading": ("Dynamic-loading API group", "The import table contains APIs used to load libraries or resolve symbols dynamically.", "low"),
+    "memory_mapping": ("Memory-mapping API group", "The import table contains APIs associated with file-backed memory mapping.", "low"),
+    "anti_analysis": ("Anti-analysis API group", "The import table contains debugger-detection or debug-output APIs.", "medium"),
+}
+
+STRING_FINDING_META = {
+    "powershell_indicators": ("PowerShell string artifacts", "PowerShell-related strings were classified in the target.", "medium"),
+    "command_indicators": ("Command-execution string artifacts", "Command-execution-related strings were classified in the target.", "low"),
+    "urls": ("URL string artifacts", "URL-like strings were found in static data.", "low"),
+    "ipv4": ("IPv4 string artifacts", "IPv4-address-like strings were found in static data.", "low"),
+    "registry_paths": ("Registry path artifacts", "Windows registry path strings were found in static data.", "low"),
+    "suspicious_apis": ("Suspicious API string artifacts", "API names associated with potentially sensitive operations were found in strings.", "low"),
+}
 
 
 # ============================================================================
@@ -1562,6 +1622,240 @@ def build_evidence_summary(
 
 
 # ============================================================================
+# REPORTING / EXPLAINABILITY
+# ============================================================================
+
+def _finding(
+    finding_id: str,
+    title: str,
+    description: str,
+    severity: str,
+    source: str,
+    evidence: Any = None,
+    points: int = 0,
+) -> dict[str, Any]:
+    """Create one normalized analyst-facing finding."""
+    result = {
+        "id": str(finding_id),
+        "title": str(title),
+        "description": str(description),
+        "severity": str(severity).lower(),
+        "source": str(source),
+        "points": max(0, _safe_int(points)),
+    }
+    if evidence is not None:
+        result["evidence"] = evidence
+    return result
+
+
+def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize existing static observations into analyst-facing findings."""
+    findings: list[dict[str, Any]] = []
+
+    section_data = report.get("section_intelligence", {})
+    flags = section_data.get("flags", {})
+    evidence_map = {
+        "has_executable_writable_section": section_data.get("executable_writable_sections", []),
+        "has_high_entropy_section": section_data.get("high_entropy_sections", []),
+        "has_empty_raw_section": section_data.get("empty_raw_sections", []),
+        "has_unusual_section_name": section_data.get("unusual_names", []),
+        "entry_point_in_executable_section": section_data.get("entry_point_section"),
+    }
+    for key, (title, description, severity) in SECTION_FINDING_META.items():
+        if flags.get(key, False):
+            findings.append(_finding(
+                f"section.{key}", title, description, severity,
+                "section_intelligence", evidence_map.get(key)
+            ))
+
+    import_data = report.get("import_intelligence", {})
+    groups = import_data.get("suspicious_groups", {})
+    if isinstance(groups, dict):
+        for group_name in sorted(groups, key=str.lower):
+            meta = IMPORT_FINDING_META.get(group_name)
+            if meta:
+                title, description, severity = meta
+                findings.append(_finding(
+                    f"imports.{group_name}", title, description, severity,
+                    "import_intelligence", groups.get(group_name, [])
+                ))
+
+    string_data = report.get("strings", {}).get("summary", {})
+    classifications = report.get("strings", {}).get("classifications", {})
+    if isinstance(classifications, dict):
+        for key, (title, description, severity) in STRING_FINDING_META.items():
+            count = _safe_int(string_data.get(key, 0))
+            if count > 0:
+                values = classifications.get(key, [])
+                findings.append(_finding(
+                    f"strings.{key}", title, description, severity, "strings",
+                    {
+                        "count": count,
+                        "examples": values[:MAX_CLASSIFIED_STRINGS_DISPLAY]
+                        if isinstance(values, list) else [],
+                    }
+                ))
+
+    indicator_counts = report.get("indicator_summary", {}).get("by_severity", {})
+    for severity in ("high", "medium", "low", "info"):
+        count = _safe_int(indicator_counts.get(severity, 0))
+        if count:
+            findings.append(_finding(
+                f"indicators.{severity}",
+                f"{severity.capitalize()} static indicators",
+                f"{count} {severity}-severity static indicator(s) were generated.",
+                severity,
+                "indicator_summary",
+                {"count": count},
+            ))
+
+    overlay = report.get("overlay", {})
+    if overlay.get("present", False):
+        findings.append(_finding(
+            "file.overlay",
+            "File overlay detected",
+            "Bytes exist after the analyzer's calculated file-backed PE end. Overlay data can be legitimate and should be reviewed in context.",
+            "low", "overlay",
+            {"offset": _safe_int(overlay.get("offset")), "size": _safe_int(overlay.get("size"))},
+        ))
+
+    certificate = report.get("certificate_analysis", {})
+    if certificate.get("present", False):
+        findings.append(_finding(
+            "certificate.present",
+            "PE certificate table present",
+            "The file contains a PE certificate table. Presence alone does not establish that the file is trustworthy.",
+            "info", "certificate_analysis",
+            {
+                "size": _safe_int(certificate.get("size")),
+                "entry_count": _safe_int(report.get("certificate_summary", {}).get("entry_count")),
+            },
+        ))
+
+    findings.sort(key=lambda item: (
+        -RISK_RATING_ORDER.get(item["severity"].upper(), 0),
+        item["title"].lower(),
+        item["id"].lower(),
+    ))
+    return findings
+
+
+def build_risk_breakdown(report: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate existing risk reasons into machine-readable source buckets."""
+    reasons = report.get("risk_assessment", {}).get("reasons", [])
+    by_source: dict[str, int] = {}
+    normalized_reasons: list[dict[str, Any]] = []
+
+    for reason in reasons:
+        points = max(0, _safe_int(reason.get("points", 0)))
+        text = str(reason.get("reason", ""))
+        lower = text.lower()
+        if "section" in lower or "entropy" in lower:
+            source = "sections"
+        elif "api" in lower or "import" in lower:
+            source = "imports"
+        elif "string" in lower or "powershell" in lower or "url" in lower:
+            source = "strings"
+        elif "indicator" in lower:
+            source = "indicators"
+        elif "overlay" in lower:
+            source = "overlay"
+        else:
+            source = "observation"
+
+        by_source[source] = by_source.get(source, 0) + points
+        normalized_reasons.append({
+            "points": points,
+            "reason": text,
+            "source": source,
+        })
+
+    return {
+        "by_source": dict(sorted(by_source.items())),
+        "reasons": normalized_reasons,
+        "total_points_before_cap": sum(by_source.values()),
+        "final_score": _safe_int(report.get("risk_assessment", {}).get("score")),
+    }
+
+
+def calculate_confidence(report: dict[str, Any]) -> dict[str, Any]:
+    """Estimate static-analysis coverage; this is not malware confidence."""
+    score = 0
+    factors: list[dict[str, Any]] = []
+
+    sections = report.get("sections", [])
+    imports = report.get("imports", {}).get("libraries", [])
+    directories = report.get("data_directories", [])
+    strings = report.get("strings", {}).get("summary", {})
+    warnings = report.get("parse_warnings", [])
+
+    checks = [
+        (bool(sections), 20, "PE sections were parsed."),
+        (bool(imports), 20, "Import information was available."),
+        (bool(directories), 15, "PE data directories were inspected."),
+        (_safe_int(strings.get("total_unique", 0)) > 0, 20, "Static string analysis produced artifacts."),
+        (bool(report.get("hashes", {}).get("sha256")), 10, "File identity hashes were calculated."),
+        (not warnings, 15, "No parser warnings were recorded."),
+    ]
+    for passed, points, reason in checks:
+        if passed:
+            score += points
+            factors.append({"points": points, "reason": reason})
+        elif reason.startswith("No parser"):
+            factors.append({"points": 0, "reason": f"{len(warnings)} parser warning(s) were recorded."})
+
+    score = min(100, score)
+    if score >= 85:
+        rating = "HIGH"
+    elif score >= 65:
+        rating = "MEDIUM"
+    elif score >= 40:
+        rating = "LOW"
+    else:
+        rating = "LIMITED"
+
+    return {
+        "score": score,
+        "rating": rating,
+        "meaning": "Confidence describes static-analysis coverage and report completeness; it is not confidence that the file is malicious.",
+        "factors": factors,
+    }
+
+
+def build_top_findings(findings: list[dict[str, Any]], limit: int = MAX_TOP_FINDINGS) -> list[dict[str, Any]]:
+    """Return a bounded findings list for terminal/dashboard use."""
+    return findings[:max(1, _safe_int(limit, MAX_TOP_FINDINGS))]
+
+
+def build_reporting_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """Build a concise reporting layer for dashboards and future web UI."""
+    risk = report.get("risk_assessment", {})
+    confidence = report.get("analysis_confidence", {})
+    findings = report.get("findings", [])
+    severity_counts = {key: 0 for key in ("critical", "high", "medium", "low", "info")}
+    for finding in findings:
+        severity = str(finding.get("severity", "info")).lower()
+        if severity in severity_counts:
+            severity_counts[severity] += 1
+
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "risk": {
+            "score": _safe_int(risk.get("score")),
+            "rating": str(risk.get("rating", "MINIMAL")),
+        },
+        "confidence": {
+            "score": _safe_int(confidence.get("score")),
+            "rating": str(confidence.get("rating", "LIMITED")),
+        },
+        "finding_count": len(findings),
+        "findings_by_severity": severity_counts,
+        "top_findings": build_top_findings(findings),
+        "analyst_note": "This report is a static-analysis prioritization aid. Findings describe observations and do not by themselves prove malicious intent.",
+    }
+
+
+# ============================================================================
 # ANALYSIS SUMMARY
 # ============================================================================
 
@@ -1649,6 +1943,17 @@ def build_analysis_summary(
                 "populated_group_count",
                 0,
             )
+        ),
+        "finding_count": len(report.get("findings", [])),
+        "high_severity_findings": sum(
+            1 for finding in report.get("findings", [])
+            if str(finding.get("severity", "")).lower() == "high"
+        ),
+        "analysis_confidence_score": _safe_int(
+            report.get("analysis_confidence", {}).get("score")
+        ),
+        "analysis_confidence_rating": str(
+            report.get("analysis_confidence", {}).get("rating", "LIMITED")
         ),
         "classified_string_artifacts": (
             _count_mapping_values(
@@ -1868,9 +2173,12 @@ def build_report(
         "tool": ENGINE_NAME,
         "module": ENGINE_MODULE,
         "analysis_version": ANALYSIS_VERSION,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
         "analysis_time": datetime.now(
             timezone.utc
         ).isoformat(),
+
+        "parse_warnings": [],
 
         "analysis_mode": {
             "static_only": True,
@@ -2019,6 +2327,15 @@ def build_report(
     )
 
     # ------------------------------------------------------------------------
+    # Reporting / explainability layer
+    # ------------------------------------------------------------------------
+
+    report["findings"] = build_findings(report)
+    report["risk_breakdown"] = build_risk_breakdown(report)
+    report["analysis_confidence"] = calculate_confidence(report)
+    report["reporting_summary"] = build_reporting_summary(report)
+
+    # ------------------------------------------------------------------------
     # Performance metrics
     # ------------------------------------------------------------------------
 
@@ -2126,6 +2443,11 @@ def print_report(
     print(
         "Execution        : NEVER "
         "(static byte analysis only)"
+    )
+
+    print(
+        f"Report schema     : "
+        f"{report.get('report_schema_version', REPORT_SCHEMA_VERSION)}"
     )
 
     print(
@@ -2653,6 +2975,40 @@ def print_report(
     )
 
     # ------------------------------------------------------------------------
+    # Findings
+    # ------------------------------------------------------------------------
+
+    print()
+    print("TOP STATIC FINDINGS")
+    print("-" * 100)
+
+    top_findings = report.get("reporting_summary", {}).get("top_findings", [])
+    if not top_findings:
+        print("[+] No findings generated.")
+    else:
+        for index, finding in enumerate(top_findings, start=1):
+            severity = str(finding.get("severity", "info")).upper()
+            print(f"{index:>2}. [{severity:<8}] {finding.get('title', 'Unnamed')}")
+            print(f"    {finding.get('description', '')}")
+            evidence = finding.get("evidence")
+            if evidence not in (None, [], {}):
+                if isinstance(evidence, list):
+                    display = ", ".join(str(value) for value in evidence[:8])
+                    if len(evidence) > 8:
+                        display += ", ..."
+                else:
+                    display = str(evidence)
+                print(f"    Evidence: {display}")
+
+    print()
+    print("ANALYSIS CONFIDENCE")
+    print("-" * 100)
+    confidence = report.get("analysis_confidence", {})
+    print(f"Score            : {_safe_int(confidence.get('score'))}/100")
+    print(f"Rating           : {confidence.get('rating', 'LIMITED')}")
+    print(f"Meaning          : {confidence.get('meaning', '')}")
+
+    # ------------------------------------------------------------------------
     # Risk
     # ------------------------------------------------------------------------
 
@@ -2691,6 +3047,17 @@ def print_report(
                 f"  {prefix}{points:>3}  "
                 f"{reason.get('reason', '')}"
             )
+
+    print()
+    print("RISK BREAKDOWN")
+    print("-" * 100)
+    risk_breakdown = report.get("risk_breakdown", {})
+    by_source = risk_breakdown.get("by_source", {})
+    if by_source:
+        for source, points in by_source.items():
+            print(f"{source:<20}: {points}")
+    else:
+        print("[+] No positive risk contributions.")
 
     # ------------------------------------------------------------------------
     # Analysis summary
@@ -2748,6 +3115,22 @@ def print_report(
     print(
         f"Risk rating            : "
         f"{analysis_summary['risk_rating']}"
+    )
+
+    print(
+        f"Findings generated     : "
+        f"{analysis_summary['finding_count']}"
+    )
+
+    print(
+        f"Analysis confidence    : "
+        f"{analysis_summary['analysis_confidence_score']}/100 "
+        f"({analysis_summary['analysis_confidence_rating']})"
+    )
+
+    print(
+        f"Report schema           : "
+        f"{report.get('report_schema_version', REPORT_SCHEMA_VERSION)}"
     )
 
     # ------------------------------------------------------------------------
@@ -2821,7 +3204,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="security-misc-pe",
         description=(
             "SECURITY-MISC read-only Windows PE "
-            "static-analysis engine."
+            "static-analysis and explainable reporting engine."
         ),
         epilog=(
             "Safety: the target file is read and analyzed as bytes; "
@@ -2859,6 +3242,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--top-findings",
+        type=int,
+        default=MAX_TOP_FINDINGS,
+        help="Maximum number of top findings printed in the terminal report.",
+    )
+
     return parser
 
 
@@ -2874,6 +3264,11 @@ def main() -> int:
     if args.string_limit < 1:
         parser.error(
             "--string-limit must be greater than zero."
+        )
+
+    if args.top_findings < 1:
+        parser.error(
+            "--top-findings must be greater than zero."
         )
 
     path = (
@@ -2899,8 +3294,19 @@ def main() -> int:
             path
         )
 
+        terminal_report = dict(report)
+        terminal_report["reporting_summary"] = dict(
+            report.get("reporting_summary", {})
+        )
+        terminal_report["reporting_summary"]["top_findings"] = (
+            build_top_findings(
+                report.get("findings", []),
+                args.top_findings,
+            )
+        )
+
         print_report(
-            report,
+            terminal_report,
             string_limit=args.string_limit,
         )
 
