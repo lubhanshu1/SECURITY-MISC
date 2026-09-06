@@ -29,7 +29,7 @@ from reverse_engineering.strings.string_analyzer import (
 # VERSION / ENGINE METADATA
 # ============================================================================
 
-ANALYSIS_VERSION = "0.9.1"
+ANALYSIS_VERSION = "0.10.0"
 ENGINE_NAME = "SECURITY-MISC"
 ENGINE_MODULE = "pe_analyzer"
 
@@ -39,6 +39,10 @@ MAX_DATA_DIRECTORIES = 16
 MAX_IMPORT_FUNCTIONS_DISPLAY = 30
 MAX_EXPORTS_DISPLAY = 50
 MAX_CLASSIFIED_STRINGS_DISPLAY = 20
+
+# Additional bounded-analysis limits. These keep the analyzer predictable
+# even when it is pointed at unusual or malformed input.
+MAX_HASH_INPUT_BYTES = MAX_FILE_SIZE_BYTES
 
 # Evidence thresholds are intentionally conservative. They describe
 # observations; they do not establish malicious intent.
@@ -306,6 +310,60 @@ def _count_mapping_values(mapping: dict[str, Any]) -> int:
 
 
 # ============================================================================
+# FILE STATISTICS
+# ============================================================================
+
+def calculate_file_statistics(data: bytes) -> dict[str, Any]:
+    """
+    Calculate lightweight byte-level statistics.
+
+    These are descriptive observations only. No bytes are executed, loaded as
+    code, or interpreted as commands.
+    """
+    length = len(data)
+
+    if length == 0:
+        return {
+            "entropy": 0.0,
+            "zero_byte_ratio": 0.0,
+            "printable_ascii_ratio": 0.0,
+            "unique_byte_values": 0,
+        }
+
+    frequencies = [0] * 256
+
+    for value in data:
+        frequencies[value] += 1
+
+    import math
+
+    entropy = 0.0
+    for count in frequencies:
+        if count:
+            probability = count / length
+            entropy -= probability * math.log2(probability)
+
+    zero_byte_ratio = frequencies[0] / length
+
+    printable_count = sum(
+        frequencies[value]
+        for value in range(0x20, 0x7F)
+    )
+
+    return {
+        "entropy": round(entropy, 4),
+        "zero_byte_ratio": round(zero_byte_ratio, 6),
+        "printable_ascii_ratio": round(
+            printable_count / length,
+            6,
+        ),
+        "unique_byte_values": sum(
+            1 for count in frequencies if count
+        ),
+    }
+
+
+# ============================================================================
 # HASHING
 # ============================================================================
 
@@ -420,7 +478,10 @@ def analyze_sections(
     high_entropy_sections: list[str] = []
     empty_sections: list[str] = []
     unusual_names: list[str] = []
+    raw_larger_than_virtual: list[str] = []
+    large_virtual_to_raw_ratio: list[str] = []
     entry_point_section: str | None = None
+    entry_point_is_executable: bool | None = None
 
     standard_names = {
         ".text",
@@ -508,6 +569,12 @@ def analyze_sections(
         if raw_size == 0 and virtual_size > 0:
             empty_sections.append(name)
 
+        if raw_size > virtual_size > 0:
+            raw_larger_than_virtual.append(name)
+
+        if raw_size > 0 and virtual_size > (raw_size * 3):
+            large_virtual_to_raw_ratio.append(name)
+
         if normalized and normalized not in standard_names:
             unusual_names.append(name)
 
@@ -523,6 +590,7 @@ def analyze_sections(
             and virtual_address <= entry_point_rva < end
         ):
             entry_point_section = name
+            entry_point_is_executable = is_executable
 
     return {
         "count": len(sections),
@@ -534,7 +602,10 @@ def analyze_sections(
         "high_entropy_sections": high_entropy_sections,
         "empty_raw_sections": empty_sections,
         "unusual_names": unusual_names,
+        "raw_larger_than_virtual": raw_larger_than_virtual,
+        "large_virtual_to_raw_ratio": large_virtual_to_raw_ratio,
         "entry_point_section": entry_point_section,
+        "entry_point_is_executable": entry_point_is_executable,
         "flags": {
             "has_executable_writable_section": bool(
                 executable_writable_sections
@@ -547,6 +618,18 @@ def analyze_sections(
             ),
             "has_unusual_section_name": bool(
                 unusual_names
+            ),
+            "has_raw_larger_than_virtual": bool(
+                raw_larger_than_virtual
+            ),
+            "has_large_virtual_to_raw_ratio": bool(
+                large_virtual_to_raw_ratio
+            ),
+            "entry_point_in_executable_section": (
+                entry_point_is_executable is True
+            ),
+            "entry_point_section_unknown": (
+                entry_point_section is None
             ),
         },
     }
@@ -1535,6 +1618,12 @@ def build_analysis_summary(
     return {
         "static_only": True,
         "execution_performed": False,
+        "network_access_performed": False,
+        "filesystem_modification_performed": False,
+        "subprocess_execution_performed": False,
+        "file_entropy": _safe_float(
+            report.get("file_statistics", {}).get("entropy")
+        ),
         "sections_analyzed": len(sections),
         "imports_analyzed": len(imports),
         "exports_analyzed": _safe_int(
@@ -1773,6 +1862,8 @@ def build_report(
     # Base report
     # ------------------------------------------------------------------------
 
+    file_statistics = calculate_file_statistics(data)
+
     report: dict[str, Any] = {
         "tool": ENGINE_NAME,
         "module": ENGINE_MODULE,
@@ -1780,6 +1871,15 @@ def build_report(
         "analysis_time": datetime.now(
             timezone.utc
         ).isoformat(),
+
+        "analysis_mode": {
+            "static_only": True,
+            "target_execution": False,
+            "network_access": False,
+            "filesystem_modification": False,
+            "subprocess_execution": False,
+            "bounded_input_bytes": MAX_FILE_SIZE_BYTES,
+        },
 
         # Backward-compatible fields.
         "file": str(path),
@@ -1794,6 +1894,8 @@ def build_report(
         },
 
         "hashes": hashes,
+
+        "file_statistics": file_statistics,
 
         "headers": {
             "dos_magic": "MZ",
@@ -1975,6 +2077,7 @@ def print_report(
     overlay = report["overlay"]
     strings = report["strings"]
     string_summary = strings["summary"]
+    file_statistics = report["file_statistics"]
     sections = report["section_intelligence"]
     indicators = report["indicators"]
     indicator_summary = report["indicator_summary"]
@@ -2023,6 +2126,16 @@ def print_report(
     print(
         "Execution        : NEVER "
         "(static byte analysis only)"
+    )
+
+    print(
+        f"File entropy     : "
+        f"{file_statistics['entropy']:.4f}"
+    )
+
+    print(
+        f"Unique byte values: "
+        f"{file_statistics['unique_byte_values']}/256"
     )
 
     # ------------------------------------------------------------------------
@@ -2142,6 +2255,21 @@ def print_report(
     print(
         f"Unusual section names    : "
         f"{len(sections['unusual_names'])}"
+    )
+
+    print(
+        f"Raw > virtual sections  : "
+        f"{len(sections['raw_larger_than_virtual'])}"
+    )
+
+    print(
+        f"Large virtual/raw ratio  : "
+        f"{len(sections['large_virtual_to_raw_ratio'])}"
+    )
+
+    print(
+        f"Entry point executable   : "
+        f"{sections['entry_point_is_executable']}"
     )
 
     # ------------------------------------------------------------------------
@@ -2704,6 +2832,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "file",
         help="Path to the PE file.",
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {ANALYSIS_VERSION}",
     )
 
     parser.add_argument(
