@@ -29,7 +29,7 @@ from reverse_engineering.strings.string_analyzer import (
 # VERSION / ENGINE METADATA
 # ============================================================================
 
-ANALYSIS_VERSION = "0.11.0"
+ANALYSIS_VERSION = "0.12.0"
 ENGINE_NAME = "SECURITY-MISC"
 ENGINE_MODULE = "pe_analyzer"
 
