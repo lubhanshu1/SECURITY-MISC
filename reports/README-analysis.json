@@ -1,0 +1,21 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "file_analyzer",
+  "platform": "Windows",
+  "path": "E:\\SECURITY-MISC\\README.md",
+  "name": "README.md",
+  "extension": ".md",
+  "size_bytes": 0,
+  "timestamps": {
+    "modified": "2026-09-05T19:16:10.444029+05:30",
+    "accessed": "2026-09-05T19:29:12.987054+05:30",
+    "created_or_changed": "2026-09-05T19:16:10.444029+05:30"
+  },
+  "hashes": {
+    "md5": "d41d8cd98f00b204e9800998ecf8427e",
+    "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "entropy": 0.0,
+  "read_only": false
+}

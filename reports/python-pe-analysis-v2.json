@@ -1,0 +1,176 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "pe_analyzer",
+  "file": "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+  "size_bytes": 101760,
+  "headers": {
+    "dos_magic": "MZ",
+    "pe_offset": 264,
+    "machine": "x64 (AMD64)",
+    "machine_code": "0x8664",
+    "bitness": "PE32+ (64-bit)",
+    "number_of_sections": 6,
+    "timestamp_raw": 1666636167,
+    "characteristics": "0x0022",
+    "entry_point_rva": "0x000012A0",
+    "image_base": "0x140000000"
+  },
+  "sections": [
+    {
+      "name": ".text",
+      "virtual_size": 3388,
+      "virtual_address": 4096,
+      "raw_size": 3584,
+      "raw_pointer": 1024,
+      "characteristics": "CODE | READ | EXECUTE",
+      "entropy": 5.7934
+    },
+    {
+      "name": ".rdata",
+      "virtual_size": 3926,
+      "virtual_address": 8192,
+      "raw_size": 4096,
+      "raw_pointer": 4608,
+      "characteristics": "READ",
+      "entropy": 4.1299
+    },
+    {
+      "name": ".data",
+      "virtual_size": 1592,
+      "virtual_address": 12288,
+      "raw_size": 512,
+      "raw_pointer": 8704,
+      "characteristics": "READ | WRITE",
+      "entropy": 0.4444
+    },
+    {
+      "name": ".pdata",
+      "virtual_size": 348,
+      "virtual_address": 16384,
+      "raw_size": 512,
+      "raw_pointer": 9216,
+      "characteristics": "READ",
+      "entropy": 2.768
+    },
+    {
+      "name": ".rsrc",
+      "virtual_size": 80784,
+      "virtual_address": 20480,
+      "raw_size": 80896,
+      "raw_pointer": 9728,
+      "characteristics": "READ",
+      "entropy": 6.165
+    },
+    {
+      "name": ".reloc",
+      "virtual_size": 48,
+      "virtual_address": 102400,
+      "raw_size": 512,
+      "raw_pointer": 90624,
+      "characteristics": "READ",
+      "entropy": 0.7123
+    }
+  ],
+  "imports": {
+    "dll_count": 8,
+    "function_count": 44,
+    "libraries": [
+      {
+        "dll": "python311.dll",
+        "functions": [
+          "Py_Main"
+        ],
+        "function_count": 1
+      },
+      {
+        "dll": "VCRUNTIME140.dll",
+        "functions": [
+          "__C_specific_handler",
+          "__current_exception",
+          "__current_exception_context",
+          "memset",
+          "memcpy"
+        ],
+        "function_count": 5
+      },
+      {
+        "dll": "api-ms-win-crt-runtime-l1-1-0.dll",
+        "functions": [
+          "_initialize_onexit_table",
+          "_register_onexit_function",
+          "_crt_atexit",
+          "terminate",
+          "_get_initial_wide_environment",
+          "_register_thread_local_exe_atexit_callback",
+          "_initialize_wide_environment",
+          "_configure_wide_argv",
+          "_initterm",
+          "_set_app_type",
+          "_seh_filter_exe",
+          "_c_exit",
+          "_cexit",
+          "__p___wargv",
+          "__p___argc",
+          "_initterm_e",
+          "_exit",
+          "exit"
+        ],
+        "function_count": 18
+      },
+      {
+        "dll": "api-ms-win-crt-math-l1-1-0.dll",
+        "functions": [
+          "__setusermatherr"
+        ],
+        "function_count": 1
+      },
+      {
+        "dll": "api-ms-win-crt-stdio-l1-1-0.dll",
+        "functions": [
+          "__p__commode",
+          "_set_fmode"
+        ],
+        "function_count": 2
+      },
+      {
+        "dll": "api-ms-win-crt-locale-l1-1-0.dll",
+        "functions": [
+          "_configthreadlocale"
+        ],
+        "function_count": 1
+      },
+      {
+        "dll": "api-ms-win-crt-heap-l1-1-0.dll",
+        "functions": [
+          "_set_new_mode"
+        ],
+        "function_count": 1
+      },
+      {
+        "dll": "KERNEL32.dll",
+        "functions": [
+          "GetCurrentThreadId",
+          "GetCurrentProcessId",
+          "QueryPerformanceCounter",
+          "IsProcessorFeaturePresent",
+          "TerminateProcess",
+          "GetCurrentProcess",
+          "SetUnhandledExceptionFilter",
+          "UnhandledExceptionFilter",
+          "RtlVirtualUnwind",
+          "RtlLookupFunctionEntry",
+          "RtlCaptureContext",
+          "InitializeSListHead",
+          "IsDebuggerPresent",
+          "GetSystemTimeAsFileTime",
+          "GetModuleHandleW"
+        ],
+        "function_count": 15
+      }
+    ]
+  },
+  "exports": {
+    "count": 0,
+    "functions": []
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "certificate_analysis",
+  "file": "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+  "file_size": 101760,
+  "security_directory": {
+    "present": true,
+    "file_offset": 91136,
+    "size": 10624,
+    "entries": [
+      {
+        "offset": 91136,
+        "length": 10624,
+        "revision": "0x0200",
+        "type": "0x0002",
+        "is_pkcs_signed_data": true,
+        "is_revision_2_0": true
+      }
+    ]
+  }
+}

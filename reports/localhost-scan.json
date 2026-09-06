@@ -1,0 +1,29 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "tcp_port_assessment",
+  "started_at": "2026-09-05T14:38:39.859772+00:00",
+  "duration_seconds": 16.598,
+  "target": "127.0.0.1",
+  "resolved_ip": "127.0.0.1",
+  "port_range": {
+    "start": 1,
+    "end": 1024
+  },
+  "timeout_seconds": 0.5,
+  "workers": 32,
+  "open_ports": 2,
+  "results": [
+    {
+      "port": 135,
+      "state": "open",
+      "service": "epmap",
+      "latency_ms": 1.5
+    },
+    {
+      "port": 445,
+      "state": "open",
+      "service": "microsoft-ds",
+      "latency_ms": 0.28
+    }
+  ]
+}

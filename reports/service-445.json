@@ -1,0 +1,14 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "service_detector",
+  "timestamp": "2026-09-05T14:41:21.080600+00:00",
+  "result": {
+    "target": "127.0.0.1",
+    "port": 445,
+    "reachable": true,
+    "service": "microsoft-ds",
+    "hostname": "Lubhanshu-Yoga-7i",
+    "latency_ms": 22.37,
+    "error": null
+  }
+}

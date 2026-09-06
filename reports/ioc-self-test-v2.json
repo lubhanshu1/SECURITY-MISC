@@ -1,0 +1,17 @@
+{
+  "tool": "SECURITY-MISC",
+  "module": "ioc_extractor",
+  "timestamp": "2026-09-05T14:52:57.281238+00:00",
+  "file": "E:\\SECURITY-MISC\\forensics\\file_analysis\\file_analyzer.py",
+  "total_iocs": 0,
+  "iocs": {
+    "ipv4": [],
+    "url": [],
+    "email": [],
+    "md5": [],
+    "sha1": [],
+    "sha256": [],
+    "windows_path": [],
+    "domain": []
+  }
+}
