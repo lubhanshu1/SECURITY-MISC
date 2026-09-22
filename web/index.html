@@ -81,4 +81,39 @@ function analyze(){const el=document.getElementById('target'),state=document.get
 function copyReport(){navigator.clipboard?.writeText('SECURITY-MISC\nStatic analysis console\nStatus: COMPLETE\nMode: READ-ONLY').then(()=>alert('Report summary copied.'))}
 function scrollModules(){document.querySelector('.section').scrollIntoView({behavior:'smooth'})}
 </script>
-</body></html>
+
+<script>
+(function(){
+  function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+  function uniq(a){return Array.from(new Set(a));}
+  function entropy(a){var f=new Array(256).fill(0),e=0;if(!a.length)return 0;for(var i=0;i<a.length;i++)f[a[i]]++;for(i=0;i<256;i++)if(f[i]){var p=f[i]/a.length;e-=p*Math.log2(p);}return e;}
+  async function hash(buf,alg){var h=await crypto.subtle.digest(alg,buf);return Array.from(new Uint8Array(h)).map(function(x){return x.toString(16).padStart(2,"0");}).join("");}
+  function iocs(t){
+    var clean=function(s){return s.replace(/[.,;:!?\\)\\]\\}>\"']+$/,"");};
+    var ip=uniq((t.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)||[]).filter(function(x){return x.split(".").every(function(n){return +n<=255;});}));
+    var url=uniq((t.match(/https?:\/\/[^\s<>'"\x60]+/gi)||[]).map(clean));
+    var email=uniq(t.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g)||[]);
+    var md5=uniq(t.match(/\b[a-fA-F0-9]{32}\b/g)||[]),sha1=uniq(t.match(/\b[a-fA-F0-9]{40}\b/g)||[]),sha256=uniq(t.match(/\b[a-fA-F0-9]{64}\b/g)||[]);
+    var domain=uniq((t.match(/\b(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|edu|gov|io|ai|dev|app|tech|in|uk|us|co|me|xyz|online|cloud|site)\b/gi)||[]).map(function(x){return x.toLowerCase();}));
+    return {ipv4:ip,url:url,email:email,md5:md5,sha1:sha1,sha256:sha256,domain:domain};
+  }
+  function strings(a){var o=[],s="";for(var i=0;i<a.length;i++){var c=a[i];if(c>=32&&c<=126)s+=String.fromCharCode(c);else{if(s.length>=5)o.push(s);s="";}}if(s.length>=5)o.push(s);return uniq(o);}
+  function pe(a){if(a.length<64||a[0]!==77||a[1]!==90)return null;var o=(a[60]|a[61]<<8|a[62]<<16|a[63]<<24)>>>0;if(o+24>a.length||a[o]!==80||a[o+1]!==69)return {candidate:true,offset:o};return {candidate:true,offset:o,machine:"0x"+(a[o+4]|a[o+5]<<8).toString(16),sections:a[o+6]|a[o+7]<<8};}
+  function ensure(){
+    var host=document.querySelector(".search-console");if(!host||document.getElementById("sm-upload"))return;
+    host.insertAdjacentHTML("afterend",'<section id="sm-upload" style="max-width:860px;margin:16px auto;border:1px dashed rgba(114,242,207,.3);background:rgba(9,12,18,.9);padding:18px"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><span class="eyebrow">EVIDENCE LAB // LOCAL STATIC ANALYSIS</span><div style="color:#7d899b;font-size:11px;margin-top:6px">Files are analyzed inside this browser. Nothing is uploaded and binaries are never executed.</div></div><label style="background:#72f2cf;color:#07100e;padding:10px 14px;font-weight:700;cursor:pointer">Analyze file<input id="sm-file" type="file" style="display:none"></label></div><div id="sm-result" style="margin-top:14px"></div></section>');
+    document.getElementById("sm-file").addEventListener("change",function(e){scan(e.target.files[0]);});
+  }
+  async function scan(file){
+    if(!file)return;
+    var buf=await file.arrayBuffer(),a=new Uint8Array(buf),t=new TextDecoder().decode(a),ic=iocs(t),ss=strings(a),p=pe(a),total=Object.values(ic).reduce(function(n,v){return n+v.length},0),e=entropy(a),risk=Math.min(100,Math.round(e/8*35+Math.min(1,total/12)*35+(p?10:0)));
+    var sha256=await hash(buf,"SHA-256"),sha1=await hash(buf,"SHA-1");
+    var cards=Object.entries(ic).map(function(x){return '<div style="border:1px solid #1b2732;padding:10px"><small style="color:#627286">'+x[0].toUpperCase()+'</small><b style="display:block;font-size:20px;margin-top:5px">'+x[1].length+'</b></div>';}).join("");
+    var list=Object.entries(ic).flatMap(function(x){return x[1].map(function(v){return '<div style="padding:6px 0;border-bottom:1px solid #18222d;font:500 9px DM Mono;color:#9eabb9"><b style="color:#5ff3d0">'+x[0]+'</b> '+esc(v)+'</div>';});}).join("");
+    document.getElementById("sm-result").innerHTML='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">'+cards+'</div><div style="margin-top:12px;border:1px solid #1b2732;padding:14px"><b>'+esc(file.name)+'</b><span style="color:#738095"> • '+file.size+' bytes • entropy '+e.toFixed(2)+' • risk '+risk+'/100</span><div style="margin-top:8px;height:5px;background:#151e27"><div style="width:'+risk+'%;height:100%;background:linear-gradient(90deg,#5ff2cf,#8c8fff)"></div></div><div style="margin-top:9px;color:#7a8798;font:500 8px DM Mono">SHA-256 '+sha256+'<br>SHA-1 '+sha1+'</div>'+(p?'<div style="margin-top:9px;color:#9daaba">PE candidate detected • offset 0x'+p.offset.toString(16)+(p.machine?' • '+p.machine:'')+(p.sections?' • '+p.sections+' sections':'')+'</div>':'')+'</div><div style="margin-top:10px;max-height:180px;overflow:auto">'+(list||'<span style="color:#667587">No common IOCs detected.</span>')+'</div><button id="sm-export" style="margin-top:10px;background:#0b1118;border:1px solid #27333f;color:#b7c1ce;padding:9px 12px;cursor:pointer">Export JSON report</button>';
+    var report={tool:"SECURITY-MISC",version:"2.0",file:file.name,size:file.size,type:file.type||"unknown",sha256:sha256,sha1:sha1,entropy:e,iocs:ic,printableStrings:ss.slice(0,150),pe:p,risk:risk,analyzedAt:new Date().toISOString()};
+    document.getElementById("sm-export").onclick=function(){var b=new Blob([JSON.stringify(report,null,2)],{type:"application/json"}),u=URL.createObjectURL(b),a=document.createElement("a");a.href=u;a.download=file.name+".security-misc.json";a.click();URL.revokeObjectURL(u);};
+  }
+  ensure();setTimeout(ensure,500);
+})();
+</script></body></html>
