@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SECURITY-MISC // Security Research Console</title>
+<meta name="theme-color" content="#05070a">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+:root{--bg:#05070a;--panel:#0b1017;--line:rgba(255,255,255,.09);--muted:#778296;--text:#edf7f5;--cyan:#63f3d0;--violet:#8b91ff;--amber:#ffbd6a;--red:#ff6b7d;--green:#6dff9a}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 15% 0,rgba(99,243,208,.08),transparent 26%),radial-gradient(circle at 100% 30%,rgba(139,145,255,.08),transparent 30%),var(--bg);color:var(--text);font-family:"Space Grotesk",sans-serif}
+button,input{font:inherit}button{cursor:pointer}.shell{min-height:100vh}.noise{position:fixed;inset:0;opacity:.035;pointer-events:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E")}
+.top{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:15px 4vw;border-bottom:1px solid var(--line);background:rgba(5,7,10,.78);backdrop-filter:blur(18px)}.brand{display:flex;align-items:center;gap:11px}.mark{width:34px;height:34px;display:grid;place-items:center;border:1px solid rgba(99,243,208,.35);color:var(--cyan);font:500 10px "DM Mono"}h1,h2,h3,p{margin:0}.brand strong{display:block;font-size:16px}.brand span:last-child{color:#708093;font:500 9px "DM Mono";letter-spacing:.12em;text-transform:uppercase}.live{font:500 9px "DM Mono";letter-spacing:.12em;color:#6e7b8e;text-transform:uppercase}.dot{display:inline-block;width:6px;height:6px;background:var(--green);border-radius:50%;box-shadow:0 0 12px rgba(109,255,154,.7);margin-right:7px}
+main{width:min(1320px,92vw);margin:0 auto}.hero{padding:72px 0 44px}.kicker,.eyebrow{font:500 9px "DM Mono";text-transform:uppercase;letter-spacing:.15em;color:var(--cyan)}.hero h1{font-size:clamp(48px,8vw,100px);line-height:.9;letter-spacing:-.06em;margin:18px 0}.hero h1 span{color:#737d91}.hero p{max-width:760px;color:var(--muted);line-height:1.7;font-size:16px}
+.grid{display:grid;grid-template-columns:1.35fr .65fr;gap:14px}.panel{border:1px solid var(--line);background:rgba(10,14,20,.82)}.console{padding:22px}.panel-head{display:flex;justify-content:space-between;align-items:center;color:#647086;font:500 9px "DM Mono";letter-spacing:.1em;text-transform:uppercase;margin-bottom:14px}.scan-input{display:flex;gap:10px;border:1px solid var(--line);padding:8px;background:#070a0f}.scan-input input{flex:1;background:transparent;border:0;outline:0;color:var(--text);padding:10px}.scan-input button{border:0;background:var(--cyan);color:#06110f;font-weight:700;padding:10px 14px}.hint{color:#596477;font:500 9px "DM Mono";margin-top:10px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}.stat{padding:18px;border:1px solid var(--line);background:rgba(10,14,20,.72)}.stat small{display:block;color:#637085;font:500 9px "DM Mono";text-transform:uppercase;letter-spacing:.1em}.stat b{display:block;font-size:34px;letter-spacing:-.06em;margin:9px 0 3px}.stat span{color:#6d788a;font-size:10px}
+.feed{padding:22px}.event{display:flex;gap:11px;padding:13px 0;border-bottom:1px solid var(--line)}.event:last-child{border-bottom:0}.badge{width:9px;height:9px;border-radius:50%;margin-top:5px;background:var(--cyan)}.event:nth-child(2) .badge{background:var(--amber)}.event:nth-child(3) .badge{background:var(--violet)}.event:nth-child(4) .badge{background:var(--green)}.event strong{display:block;font-size:12px}.event span{display:block;color:#6f7b8e;font:500 9px "DM Mono";margin-top:4px}
+.section{margin:16px 0}.section-title{display:flex;justify-content:space-between;align-items:end;margin:0 0 12px}.section-title h2{font-size:26px;letter-spacing:-.04em}.section-title span{color:#566175;font:500 9px "DM Mono";text-transform:uppercase}
+.modules{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.module{padding:22px;border:1px solid var(--line);background:linear-gradient(180deg,rgba(15,19,27,.88),rgba(9,12,17,.82));min-height:210px}.module h3{font-size:16px;margin:12px 0 8px}.module p{color:#768194;font-size:11px;line-height:1.7}.module .tag{display:inline-block;padding:5px 7px;border:1px solid var(--line);color:#8f99aa;font:500 8px "DM Mono";text-transform:uppercase}.module button{margin-top:18px;width:100%;padding:10px;border:1px solid var(--line);background:#0c1118;color:#cbd4df}.module button:hover{border-color:rgba(99,243,208,.3);color:var(--cyan)}
+.report{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:22px}.report-block{border-top:1px solid var(--line);padding-top:15px}.report-block h3{font-size:12px;margin-bottom:10px}.mono{font:500 9px/1.75 "DM Mono";color:#7f8a9d}.bar{height:6px;background:#141a23;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--violet))}
+.actions{display:flex;gap:10px;flex-wrap:wrap}.actions button{padding:10px 12px;border:1px solid var(--line);background:#0a0e14;color:#aeb8c8}.actions button.primary{background:var(--cyan);color:#06100e;border-color:var(--cyan);font-weight:700}
+.footer{padding:30px 0 48px;color:#4e596d;font:500 9px "DM Mono";display:flex;justify-content:space-between;gap:20px;text-transform:uppercase;letter-spacing:.08em}
+@media(max-width:920px){.grid,.report{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,1fr)}.modules{grid-template-columns:1fr}.live{display:none}}
+@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.scan-input{flex-wrap:wrap}.scan-input button{width:100%}.footer{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="shell"><div class="noise"></div>
+<header class="top"><div class="brand"><div class="mark">SM</div><div><strong>SECURITY-MISC</strong><span>Research & analysis console</span></div></div><div class="live"><span class="dot"></span>LOCAL-FIRST // READ-ONLY ANALYSIS</div></header>
+<main>
+<section class="hero">
+<div class="kicker"><span class="dot"></span> static security research cockpit</div>
+<h1>Analyze. Correlate.<br><span>Understand the signal.</span></h1>
+<p>A futuristic control surface for the SECURITY-MISC toolkit: forensic analysis, IOC extraction, PE reverse engineering, string intelligence, and network assessment—presented as a focused research workspace.</p>
+</section>
+
+<div class="grid">
+<section class="panel console"><div class="panel-head"><span>Analysis session</span><span id="session">SESSION // READY</span></div>
+<div class="scan-input"><input id="target" placeholder="Enter a local artifact name or research target…"><button onclick="analyze()">Run analysis</button></div>
+<div class="hint">Safe demo mode: the web console visualizes toolkit capabilities; it does not execute binaries or launch remote actions.</div>
+<div class="cards">
+<div class="stat"><small>Forensics</small><b>01</b><span>file analysis pipeline</span></div>
+<div class="stat"><small>IOC classes</small><b>08</b><span>indicator families</span></div>
+<div class="stat"><small>PE signals</small><b>20+</b><span>static-analysis signals</span></div>
+<div class="stat"><small>Network</small><b>02</b><span>assessment modules</span></div>
+</div>
+</section>
+
+<aside class="panel feed"><div class="panel-head"><span>System telemetry</span><span>LIVE</span></div>
+<div class="event"><i class="badge"></i><div><strong>Forensic pipeline</strong><span>FILE → HASH → IOC → REPORT</span></div></div>
+<div class="event"><i class="badge"></i><div><strong>Reverse engineering</strong><span>PE HEADER / IMPORT / EXPORT / CERT</span></div></div>
+<div class="event"><i class="badge"></i><div><strong>String intelligence</strong><span>ASCII / UTF-16 / URL / API INDICATORS</span></div></div>
+<div class="event"><i class="badge"></i><div><strong>Network assessment</strong><span>TCP PORT + SERVICE METADATA</span></div></div>
+</aside>
+</div>
+
+<section class="section"><div class="section-title"><h2>Capability matrix</h2><span>/ 01 // modules</span></div>
+<div class="modules">
+<article class="module"><span class="tag">Forensics</span><h3>Evidence Graph</h3><p>Turn a file into a structured evidence chain: metadata, hashes, entropy, IOCs, and an exportable report surface.</p><button onclick="setTarget('sample-artifact.bin')">Open workflow →</button></article>
+<article class="module"><span class="tag">Threat intel</span><h3>IOC Observatory</h3><p>Visualize IPv4, domains, URLs, emails, hashes, Windows paths, and other extracted indicators with category counts.</p><button onclick="setTarget('ioc-observation.txt')">Open workflow →</button></article>
+<article class="module"><span class="tag">Reverse engineering</span><h3>PE Intelligence</h3><p>Expose sections, imports, exports, certificates, overlays, string classes, static indicators, and a read-only risk signal.</p><button onclick="setTarget('sample.exe')">Open workflow →</button></article>
+</div></section>
+
+<section class="section panel report"><div>
+<div class="panel-title"><span>Example analysis telemetry</span><span id="analysisState">IDLE</span></div>
+<div class="report-block"><h3>Static risk signal</h3><div class="mono">Illustrative visualization derived from the repository's report structure.</div><div style="margin-top:12px" class="bar"><div id="risk" class="fill" style="width:62%"></div></div><div class="mono" style="margin-top:8px">62 / 100 // REVIEW REQUIRED</div></div>
+<div class="report-block"><h3>Evidence channels</h3><div class="mono">SHA-256&nbsp;&nbsp;&nbsp;&nbsp;████████████████████</div><div class="mono">Entropy&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;███████████████</div><div class="mono">IOC density&nbsp;&nbsp;████████████</div><div class="mono">String signal&nbsp; █████████████████</div></div>
+</div>
+<div>
+<div class="panel-title"><span>Operator actions</span><span>SAFE MODE</span></div>
+<div class="actions"><button class="primary" onclick="analyze()">Simulate analysis</button><button onclick="copyReport()">Copy report</button><button onclick="scrollModules()">View modules</button></div>
+<div class="mono" style="margin-top:18px">No uploaded files, credentials, remote targets, or execution paths are required by this interface.</div>
+</div></section>
+
+<footer class="footer"><span>SECURITY-MISC // security research toolkit</span><span>static console • read-only visualization</span></footer>
+</main>
+</div>
+<script>
+function setTarget(v){document.getElementById('target').value=v;window.scrollTo({top:0,behavior:'smooth'});document.getElementById('target').focus()}
+function analyze(){const el=document.getElementById('target'),state=document.getElementById('session'),a=document.getElementById('analysisState');state.textContent='SESSION // PROCESSING';a.textContent='RUNNING';let i=62;const t=setInterval(()=>{i=Math.min(87,i+4);document.getElementById('risk').style.width=i+'%';if(i>=87){clearInterval(t);state.textContent='SESSION // COMPLETE';a.textContent='COMPLETE'}},90)}
+function copyReport(){navigator.clipboard?.writeText('SECURITY-MISC\nStatic analysis console\nStatus: COMPLETE\nMode: READ-ONLY').then(()=>alert('Report summary copied.'))}
+function scrollModules(){document.querySelector('.section').scrollIntoView({behavior:'smooth'})}
+</script>
+</body></html>
