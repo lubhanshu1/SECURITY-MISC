@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "echo 'SECURITY-MISC static console'",
+  "outputDirectory": ".",
+  "cleanUrls": true,
+  "trailingSlash": false
+}
